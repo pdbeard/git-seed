@@ -1,0 +1,368 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Config ────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+XDG_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/git-seed/repos.conf"
+
+if [[ -n "${CONF_FILE:-}" ]]; then
+    CONF="$CONF_FILE"
+elif [[ -f "$XDG_CONF" ]]; then
+    CONF="$XDG_CONF"
+else
+    CONF="$SCRIPT_DIR/repos.conf"
+fi
+
+BASE_DIR="${BASE_DIR:-$HOME/git-seed-repos}"
+DRY_RUN=false
+CLONE_ONLY=false
+PULL_ONLY=false
+
+# ── Auth ──────────────────────────────────────────────────────────
+_TOKEN=""
+
+get_token() {
+    if [[ "$_TOKEN" == "__none__" ]]; then
+        return
+    fi
+    if [[ -n "$_TOKEN" ]]; then
+        echo "$_TOKEN"
+        return
+    fi
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        _TOKEN="$GITHUB_TOKEN"
+    elif command -v gh &>/dev/null; then
+        _TOKEN="$(gh auth token 2>/dev/null || true)"
+    fi
+    if [[ -z "$_TOKEN" ]]; then
+        _TOKEN="__none__"
+        return
+    fi
+    echo "$_TOKEN"
+}
+
+# ── Parse conf ────────────────────────────────────────────────────
+# Calls: callback base_dir dir owner/repo
+# Handles [path] sections, skips comments and blank lines,
+# warns on malformed entries. Entries above any [path] section
+# use BASE_DIR as fallback.
+parse_conf() {
+    local callback="$1"
+    local current_base="$BASE_DIR"
+
+    if [[ ! -f "$CONF" ]]; then
+        echo "[ERROR] Config file not found: $CONF" >&2
+        exit 1
+    fi
+
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]]           && continue
+
+        if [[ "$line" =~ ^\[path[[:space:]]+(.+)\]$ ]]; then
+            current_base="${BASH_REMATCH[1]/#\~/$HOME}"
+            continue
+        fi
+
+        local dir repo
+        read -r dir repo <<< "$line"
+        [[ -z "$dir" || -z "$repo" ]] && continue
+
+        if [[ "$repo" != */* ]]; then
+            echo "[WARN]  Skipping malformed entry: $line" >&2
+            continue
+        fi
+
+        "$callback" "$current_base" "$dir" "$repo" || true
+    done < "$CONF"
+}
+
+# ── Collect unique [path] entries from conf ───────────────────────
+# Only includes BASE_DIR if there are entries above any [path] section.
+get_conf_paths() {
+    local -n _out="$1"
+
+    [[ ! -f "$CONF" ]] && _out["$BASE_DIR"]=1 && return
+
+    local seen_path_section=false
+    local has_pre_section_entries=false
+
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]]           && continue
+
+        if [[ "$line" =~ ^\[path[[:space:]]+(.+)\]$ ]]; then
+            seen_path_section=true
+            local p="${BASH_REMATCH[1]/#\~/$HOME}"
+            _out["$p"]=1
+        elif [[ "$seen_path_section" == false ]]; then
+            has_pre_section_entries=true
+        fi
+    done < "$CONF"
+
+    if [[ "$seen_path_section" == false || "$has_pre_section_entries" == true ]]; then
+        _out["$BASE_DIR"]=1
+    fi
+}
+
+# ── Sync callback (clone missing, pull existing) ──────────────────
+do_sync() {
+    local base_dir="$1" dir="$2" repo="$3"
+    local dest="$base_dir/$dir/$(basename "$repo")"
+
+    if [[ -d "$dest" ]]; then
+        if [[ "$CLONE_ONLY" == true ]]; then
+            echo "[SKIP]  $repo (already exists)"
+            return
+        fi
+        if [[ "$DRY_RUN" == true ]]; then
+            echo "[DRY]   would pull $repo"
+        else
+            echo "[PULL]  $repo"
+            git -C "$dest" pull || { echo "[ERROR] Failed to pull $repo"; return 1; }
+        fi
+        return
+    fi
+
+    if [[ "$PULL_ONLY" == true ]]; then
+        echo "[SKIP]  $repo (not cloned)"
+        return
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        echo "[DRY]   would clone $repo → $dest"
+        return
+    fi
+
+    local token
+    token="$(get_token)"
+    local url="https://github.com/${repo}.git"
+    mkdir -p "$base_dir/$dir"
+    echo "[CLONE] $repo → $dest"
+
+    if [[ -n "$token" ]]; then
+        git -c "credential.helper=!f() { echo username=x-access-token; echo password=$token; }; f" \
+            clone "$url" "$dest" || { echo "[ERROR] Failed to clone $repo"; return 1; }
+    else
+        git clone "$url" "$dest" || { echo "[ERROR] Failed to clone $repo"; return 1; }
+    fi
+}
+
+# ── Status callback ───────────────────────────────────────────────
+STATUS_CLONED=0
+STATUS_MISSING=0
+STATUS_DIRTY=0
+
+do_status() {
+    local base_dir="$1" dir="$2" repo="$3"
+    local dest="$base_dir/$dir/$(basename "$repo")"
+
+    if [[ ! -d "$dest" ]]; then
+        printf "[MISSING] %s\n" "$repo"
+        STATUS_MISSING=$((STATUS_MISSING + 1))
+    elif ! git -C "$dest" diff --quiet 2>/dev/null || \
+         ! git -C "$dest" diff --cached --quiet 2>/dev/null; then
+        printf "[DIRTY]   %s\n" "$repo"
+        STATUS_DIRTY=$((STATUS_DIRTY + 1))
+        STATUS_CLONED=$((STATUS_CLONED + 1))
+    else
+        printf "[OK]      %s\n" "$repo"
+        STATUS_CLONED=$((STATUS_CLONED + 1))
+    fi
+}
+
+# ── Scout ─────────────────────────────────────────────────────────
+scout_repos() {
+    declare -A search_paths
+    get_conf_paths search_paths
+
+    # Build known set from conf, including commented-out entries
+    declare -A known
+    if [[ -f "$CONF" ]]; then
+        while IFS= read -r line; do
+            local stripped="${line#\#}"
+            stripped="${stripped#"${stripped%%[! ]*}"}"
+            [[ "$stripped" =~ ^\[path ]] && continue
+            local _ repo
+            read -r _ repo <<< "$stripped"
+            [[ -n "$repo" && "$repo" == */* ]] && known["$repo"]=1
+        done < "$CONF"
+    fi
+
+    local found=0
+    local added=0
+
+    for search_dir in "${!search_paths[@]}"; do
+        [[ ! -d "$search_dir" ]] && continue
+
+        while IFS= read -r gitdir; do
+            local repo_path="${gitdir%/.git}"
+            local rel_path="${repo_path#"$search_dir"/}"
+
+            local dir folder_name
+            folder_name="${rel_path##*/}"
+            if [[ "$rel_path" == */* ]]; then
+                dir="${rel_path%/*}"
+            else
+                dir=""
+            fi
+
+            local remote owner_repo
+            remote=$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)
+            if [[ "$remote" =~ github\.com[:/]([^/]+/[^/.]+)(\.git)?$ ]]; then
+                owner_repo="${BASH_REMATCH[1]}"
+            else
+                owner_repo="$folder_name"
+            fi
+
+            [[ -n "${known[$owner_repo]:-}" ]] && continue
+
+            if [[ -z "$dir" ]]; then
+                echo "  [SKIP] Could not determine directory for $owner_repo, skipping."
+                continue
+            fi
+
+            found=$((found + 1))
+            echo ""
+            echo "  Found:  $owner_repo"
+            echo "  Path:   $repo_path"
+            [[ -n "$remote" ]] && echo "  Remote: $remote"
+
+            printf "  Add to repos.conf under '%s'? [y/N] " "$dir"
+            local answer; read -r answer </dev/tty
+            [[ ! "$answer" =~ ^[Yy]$ ]] && continue
+
+            # Insert under the matching [path] section, or append a new one.
+            # Match against both ~ and full path forms to handle either style in conf.
+            local section_header_tilde="[path ${search_dir/#$HOME/\~}]"
+            local section_header_full="[path $search_dir]"
+            local section_header=""
+            if grep -qF "$section_header_tilde" "$CONF" 2>/dev/null; then
+                section_header="$section_header_tilde"
+            elif grep -qF "$section_header_full" "$CONF" 2>/dev/null; then
+                section_header="$section_header_full"
+            fi
+            if [[ -n "$section_header" ]]; then
+                local tmp
+                tmp="$(mktemp)"
+                awk -v hdr="$section_header" -v entry="$dir  $owner_repo" '
+                    BEGIN { in_section=0; last_entry_line=0; header_line=0 }
+                    $0 == hdr { in_section=1; header_line=NR }
+                    in_section && /^\[path / && $0 != hdr { in_section=0 }
+                    in_section && /^[^#\[]/ && NF { last_entry_line=NR }
+                    { lines[NR]=$0 }
+                    END {
+                        insert_after = (last_entry_line > 0) ? last_entry_line : header_line
+                        for (i=1; i<=NR; i++) {
+                            print lines[i]
+                            if (i==insert_after) print entry
+                        }
+                    }
+                ' "$CONF" > "$tmp" && mv "$tmp" "$CONF" || { rm -f "$tmp"; echo "  [ERROR] Failed to update conf"; continue; }
+            else
+                printf "\n%s\n%s\n" "$section_header_tilde" "$dir  $owner_repo" >> "$CONF"
+            fi
+
+            echo "  [ADDED] $dir  $owner_repo"
+            known["$owner_repo"]=1
+            added=$((added + 1))
+
+        done < <(find "$search_dir" -name ".git" -type d -prune 2>/dev/null | sort)
+    done
+
+    echo ""
+    if [[ "$found" -eq 0 ]]; then
+        echo "[OK] All repos are already tracked in repos.conf."
+    elif [[ "$added" -eq 0 ]]; then
+        echo "[OK] $found untracked repo(s) found, none added."
+    else
+        echo "[DONE] Added $added of $found untracked repo(s) to repos.conf."
+    fi
+}
+
+# ── List repos via gh ─────────────────────────────────────────────
+list_repos() {
+    if ! command -v gh &>/dev/null; then
+        echo "[ERROR] 'gh' CLI required for --list. Run: gh auth login" >&2
+        exit 1
+    fi
+    echo "# Paste into repos.conf:"
+    gh repo list --limit 200 --json nameWithOwner --jq '.[].nameWithOwner' | \
+        awk '{ print "projects  " $0 }'
+}
+
+# ── Usage ─────────────────────────────────────────────────────────
+usage() {
+    cat <<EOF
+Usage: git-seed <command> [options]
+
+Commands:
+  --sync        Clone missing repos and pull existing ones
+  --clone-only  Clone missing repos, skip existing
+  --pull-only   Pull existing repos, skip missing
+  --scout       Scan paths defined in conf for untracked git repos and
+                interactively offer to add them
+  --status      Show cloned/missing/dirty state for all repos in conf
+  --list        List your GitHub repos via gh CLI (requires gh auth login)
+                Outputs lines ready to paste into repos.conf
+
+Options:
+  --dry-run     Print what would happen without making any changes
+                (works with --sync, --clone-only, --pull-only)
+  --conf FILE   Use a specific config file
+  --base DIR    Fallback base dir for entries with no [path] section
+                (default: ~/git-seed-repos)
+  --help        Show this message
+
+Config file lookup order:
+  1. --conf FILE
+  2. ~/.config/git-seed/repos.conf  (or \$XDG_CONFIG_HOME/git-seed/repos.conf)
+  3. <script dir>/repos.conf
+
+Config format (repos.conf):
+  [path ~/projects]
+  personal      youruser/your-repo
+  work          yourorg/their-repo
+
+  [path ~/src]
+  libs          someuser/a-library
+EOF
+}
+
+# ── Main ──────────────────────────────────────────────────────────
+[[ $# -eq 0 ]] && usage && exit 0
+
+COMMAND=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --sync)        COMMAND="sync" ;;
+        --clone-only)  COMMAND="clone-only" ;;
+        --pull-only)   COMMAND="pull-only" ;;
+        --scout)       COMMAND="scout" ;;
+        --status)      COMMAND="status" ;;
+        --list)        COMMAND="list" ;;
+        --dry-run)     DRY_RUN=true ;;
+        --conf)        [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --conf requires a file argument"; exit 1; }
+                       CONF="$2"; shift ;;
+        --conf=*)      CONF="${1#--conf=}"; [[ -z "$CONF" ]] && { echo "[ERROR] --conf requires a file argument"; exit 1; } ;;
+        --base)        BASE_DIR="$2"; shift ;;
+        --base=*)      BASE_DIR="${1#--base=}" ;;
+        --help)        usage; exit 0 ;;
+        *)             echo "[ERROR] Unknown option: $1"; usage; exit 1 ;;
+    esac
+    shift
+done
+
+[[ -z "$COMMAND" ]] && usage && exit 0
+
+case "$COMMAND" in
+    sync)        parse_conf do_sync ;;
+    clone-only)  CLONE_ONLY=true;  parse_conf do_sync ;;
+    pull-only)   PULL_ONLY=true;   parse_conf do_sync ;;
+    scout)       scout_repos ;;
+    status)      parse_conf do_status
+                 echo ""
+                 echo "  cloned: $STATUS_CLONED  missing: $STATUS_MISSING  dirty: $STATUS_DIRTY" ;;
+    list)        list_repos ;;
+esac

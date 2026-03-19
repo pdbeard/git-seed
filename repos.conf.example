@@ -1,0 +1,20 @@
+# git-seed repos config
+# Copy to ~/.config/git-seed/repos.conf and customise.
+#
+# Format:
+#   [path ~/some/dir]   — set base directory for entries below
+#   <subdir>  <owner/repo>
+#
+# - Subdirectory is relative to the [path] above it
+# - Entries above any [path] section fall back to --base (default: ~/git-seed-repos)
+# - Comment out lines with # to skip without deleting them
+# - Multiple [path] sections are supported
+
+[path ~/projects]
+personal  youruser/repo-name
+personal  youruser/another-repo
+work      yourorg/some-repo
+
+[path ~/src]
+libs   someuser/a-library
+tools  someuser/a-tool
