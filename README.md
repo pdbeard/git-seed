@@ -47,23 +47,46 @@ Config file is looked up in this order:
 ```
 git-seed <command> [options]
 
-Commands:
-  --sync        Clone missing repos and pull existing ones
-  --clone-only  Clone missing repos, skip existing
-  --pull-only   Pull existing repos, skip missing
-  --scout       Scan paths defined in conf for untracked git repos and
-                interactively offer to add them
-  --status      Show cloned/missing/dirty state for all repos in conf
-  --list        List your GitHub repos via gh CLI (requires gh auth login)
-                Outputs lines ready to paste into repos.conf
+Manifest commands:
+  --sync           Clone missing repos and pull existing ones
+  --clone-only     Clone missing repos, skip existing
+  --pull-only      Pull existing repos, skip missing
+  --scout          Scan paths defined in conf for untracked git repos and
+                   interactively offer to add them (multi-select fzf if present)
+  --status         Show cloned/missing/dirty state for all repos in conf
+  --list           List your GitHub repos via gh CLI (requires gh auth login)
+                   Outputs lines ready to paste into repos.conf
+
+Frontend commands:
+  --pick           fzf picker over tracked, cloned repos. Prints path on stdout.
+  --browse         fzf picker with preview (commits, status, README).
+                   Prints selected path on stdout.
+  --where <repo>   Look up the local path for owner/repo (or basename).
+                   Prints path on stdout.
+  --recent [N]     List N most-recently-committed tracked repos (default 20).
+  --dirty          List tracked repos with uncommitted changes.
+  --open [editor]  Run --browse, then open the selection in editor.
+                   Editor defaults: $EDITOR, then code, then vim.
 
 Options:
-  --dry-run     Print what would happen without making any changes
-                (works with --sync, --clone-only, --pull-only)
-  --conf FILE   Use a specific config file
-  --base DIR    Fallback base dir for entries with no [path] section
-                (default: ~/git-seed-repos)
-  --help        Show this message
+  --dry-run        Print what would happen without making any changes
+                   (works with --sync, --clone-only, --pull-only)
+  --conf FILE      Use a specific config file
+  --base DIR       Fallback base dir for entries with no [path] section
+                   (default: ~/git-seed-repos)
+  --help           Show this message
+```
+
+### Composition
+
+Frontend commands are designed to compose with other shell tools:
+
+```bash
+cd "$(git-seed --pick)"
+cd "$(git-seed --browse)"
+$EDITOR "$(git-seed --where pdbeard/intermcli)"
+git-seed --dirty | xargs -I{} git -C {} status -s
+git-seed --recent 5
 ```
 
 ## Authentication
@@ -78,4 +101,5 @@ git-seed uses authentication in the following order:
 
 - bash 4.3+
 - git
+- `fzf` (optional, used by `--pick`, `--browse`, `--open`, and `--scout` for richer interactive UI; everything degrades to numbered prompts without it)
 - `gh` CLI (optional, required for `--list` and token auth)

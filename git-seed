@@ -171,12 +171,221 @@ do_status() {
     fi
 }
 
-# ── Scout ─────────────────────────────────────────────────────────
-scout_repos() {
+# ── Emit callback + shared helpers for frontend commands ──────────
+# Emits one TAB-separated "owner/repo<TAB>path" per manifest entry.
+do_emit() {
+    local base_dir="$1" dir="$2" repo="$3"
+    printf "%s\t%s/%s/%s\n" "$repo" "$base_dir" "$dir" "$(basename "$repo")"
+}
+
+# Emit only entries whose local clone exists.
+emit_existing() {
+    parse_conf do_emit | while IFS=$'\t' read -r r p; do
+        [[ -d "$p" ]] && printf "%s\t%s\n" "$r" "$p"
+    done
+}
+
+is_dirty() {
+    local path="$1"
+    [[ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]]
+}
+
+# ── Picker shared by --pick / --browse / --open ───────────────────
+# Reads "label<TAB>path" lines on stdin, prints the chosen path to stdout.
+# Uses fzf if present, otherwise a numbered prompt.
+# $1: fzf preview command (empty string disables preview).
+pick_select() {
+    local preview="$1"
+    local lines
+    lines="$(cat)"
+    if [[ -z "$lines" ]]; then
+        echo "[ERROR] No tracked, cloned repos in manifest." >&2
+        return 1
+    fi
+
+    local selected=""
+    if command -v fzf &>/dev/null; then
+        if [[ -n "$preview" ]]; then
+            selected="$(printf "%s\n" "$lines" \
+                | fzf --delimiter=$'\t' --with-nth=1 \
+                      --preview "$preview" \
+                      --preview-window='right,60%,wrap')" || return 1
+        else
+            selected="$(printf "%s\n" "$lines" \
+                | fzf --delimiter=$'\t' --with-nth=1)" || return 1
+        fi
+    else
+        local -a arr=()
+        while IFS= read -r _line; do
+            arr+=("$_line")
+        done <<< "$lines"
+        local i=1
+        for entry in "${arr[@]}"; do
+            local label="${entry%%$'\t'*}"
+            printf "  %d) %s\n" "$i" "$label" >&2
+            i=$((i+1))
+        done
+        printf "  Choose [1-%d]: " "${#arr[@]}" >&2
+        local n
+        read -r n </dev/tty || return 1
+        [[ -z "$n" ]] && return 1
+        [[ "$n" =~ ^[0-9]+$ ]] || return 1
+        (( n >= 1 && n <= ${#arr[@]} )) || return 1
+        selected="${arr[$((n-1))]}"
+    fi
+
+    [[ -z "$selected" ]] && return 1
+    printf "%s\n" "$selected" | cut -f2
+}
+
+# ── --pick ────────────────────────────────────────────────────────
+pick_repo() {
+    emit_existing | pick_select ""
+}
+
+# ── --browse ──────────────────────────────────────────────────────
+browse_preview_cmd() {
+    cat <<'EOF'
+path={2}
+echo "Repo:   {1}"
+echo "Path:   $path"
+echo "Remote: $(git -C "$path" remote get-url origin 2>/dev/null)"
+echo
+status=$(git -C "$path" status --porcelain 2>/dev/null)
+if [ -n "$status" ]; then
+    n=$(printf "%s\n" "$status" | wc -l | tr -d ' ')
+    echo "Status: dirty ($n changes)"
+    printf "%s\n" "$status" | head -5 | sed 's/^/  /'
+else
+    echo "Status: clean"
+fi
+echo
+echo "Recent commits:"
+git -C "$path" log --oneline -10 2>/dev/null
+echo
+if [ -f "$path/README.md" ]; then
+    echo "README:"
+    head -20 "$path/README.md"
+fi
+EOF
+}
+
+browse_repos() {
+    if ! command -v fzf &>/dev/null; then
+        echo "[WARN]  fzf not found; --browse degrades to a numbered list" >&2
+    fi
+    emit_existing | pick_select "$(browse_preview_cmd)"
+}
+
+# ── --where ───────────────────────────────────────────────────────
+where_repo() {
+    local target="$1"
+
+    # Exact owner/repo match wins.
+    while IFS=$'\t' read -r repo path; do
+        if [[ "$repo" == "$target" ]]; then
+            printf "%s\n" "$path"
+            return 0
+        fi
+    done < <(parse_conf do_emit)
+
+    # Fall back to basename match (e.g. "intermcli" -> "pdbeard/intermcli").
+    while IFS=$'\t' read -r repo path; do
+        if [[ "$(basename "$repo")" == "$target" ]]; then
+            printf "%s\n" "$path"
+            return 0
+        fi
+    done < <(parse_conf do_emit)
+
+    echo "[ERROR] No manifest entry matches: $target" >&2
+    return 1
+}
+
+# ── --recent ──────────────────────────────────────────────────────
+recent_repos() {
+    local n="$1"
+    emit_existing | while IFS=$'\t' read -r r p; do
+        local ts
+        ts="$(git -C "$p" log -1 --format=%ct 2>/dev/null || true)"
+        [[ -z "$ts" ]] && ts=0
+        printf "%s\t%s\n" "$ts" "$p"
+    done | sort -rn | head -n "$n" | cut -f2
+}
+
+# ── --dirty ───────────────────────────────────────────────────────
+dirty_repos() {
+    emit_existing | while IFS=$'\t' read -r r p; do
+        is_dirty "$p" && printf "%s\n" "$p"
+    done
+}
+
+# ── --open ────────────────────────────────────────────────────────
+open_repo() {
+    local editor="$1"
+    if [[ -z "$editor" ]]; then
+        editor="${EDITOR:-}"
+    fi
+    if [[ -z "$editor" ]]; then
+        for e in code vim; do
+            if command -v "$e" &>/dev/null; then editor="$e"; break; fi
+        done
+    fi
+    if [[ -z "$editor" ]]; then
+        echo "[ERROR] No editor found (\$EDITOR unset, code/vim not on PATH)" >&2
+        exit 1
+    fi
+
+    local path
+    path="$(browse_repos)" || exit 1
+    [[ -z "$path" ]] && exit 1
+    exec "$editor" "$path"
+}
+
+# ── Scout: insert helper ──────────────────────────────────────────
+# Adds "$dir  $owner_repo" under the matching [path "$search_dir"] section,
+# or appends a fresh section if one isn't there yet.
+scout_insert_entry() {
+    local search_dir="$1" dir="$2" owner_repo="$3"
+
+    local section_header_tilde="[path ${search_dir/#$HOME/\~}]"
+    local section_header_full="[path $search_dir]"
+    local section_header=""
+    if grep -qF "$section_header_tilde" "$CONF" 2>/dev/null; then
+        section_header="$section_header_tilde"
+    elif grep -qF "$section_header_full" "$CONF" 2>/dev/null; then
+        section_header="$section_header_full"
+    fi
+
+    if [[ -n "$section_header" ]]; then
+        local tmp
+        tmp="$(mktemp)"
+        awk -v hdr="$section_header" -v entry="$dir  $owner_repo" '
+            BEGIN { in_section=0; last_entry_line=0; header_line=0 }
+            $0 == hdr { in_section=1; header_line=NR }
+            in_section && /^\[path / && $0 != hdr { in_section=0 }
+            in_section && /^[^#\[]/ && NF { last_entry_line=NR }
+            { lines[NR]=$0 }
+            END {
+                insert_after = (last_entry_line > 0) ? last_entry_line : header_line
+                for (i=1; i<=NR; i++) {
+                    print lines[i]
+                    if (i==insert_after) print entry
+                }
+            }
+        ' "$CONF" > "$tmp" && mv "$tmp" "$CONF" || { rm -f "$tmp"; return 1; }
+    else
+        printf "\n%s\n%s\n" "$section_header_tilde" "$dir  $owner_repo" >> "$CONF"
+    fi
+    return 0
+}
+
+# ── Scout: collect untracked candidates ───────────────────────────
+# Emits one TAB-separated row per candidate:
+#   owner/repo<TAB>dir<TAB>search_dir<TAB>repo_path<TAB>remote
+scout_collect_candidates() {
     declare -A search_paths
     get_conf_paths search_paths
 
-    # Build known set from conf, including commented-out entries
     declare -A known
     if [[ -f "$CONF" ]]; then
         while IFS= read -r line; do
@@ -188,9 +397,6 @@ scout_repos() {
             [[ -n "$repo" && "$repo" == */* ]] && known["$repo"]=1
         done < "$CONF"
     fi
-
-    local found=0
-    local added=0
 
     for search_dir in "${!search_paths[@]}"; do
         [[ ! -d "$search_dir" ]] && continue
@@ -216,67 +422,114 @@ scout_repos() {
             fi
 
             [[ -n "${known[$owner_repo]:-}" ]] && continue
+            [[ -z "$dir" ]] && continue
 
-            if [[ -z "$dir" ]]; then
-                echo "  [SKIP] Could not determine directory for $owner_repo, skipping."
-                continue
-            fi
-
-            found=$((found + 1))
-            echo ""
-            echo "  Found:  $owner_repo"
-            echo "  Path:   $repo_path"
-            [[ -n "$remote" ]] && echo "  Remote: $remote"
-
-            printf "  Add to repos.conf under '%s'? [y/N] " "$dir"
-            local answer; read -r answer </dev/tty
-            [[ ! "$answer" =~ ^[Yy]$ ]] && continue
-
-            # Insert under the matching [path] section, or append a new one.
-            # Match against both ~ and full path forms to handle either style in conf.
-            local section_header_tilde="[path ${search_dir/#$HOME/\~}]"
-            local section_header_full="[path $search_dir]"
-            local section_header=""
-            if grep -qF "$section_header_tilde" "$CONF" 2>/dev/null; then
-                section_header="$section_header_tilde"
-            elif grep -qF "$section_header_full" "$CONF" 2>/dev/null; then
-                section_header="$section_header_full"
-            fi
-            if [[ -n "$section_header" ]]; then
-                local tmp
-                tmp="$(mktemp)"
-                awk -v hdr="$section_header" -v entry="$dir  $owner_repo" '
-                    BEGIN { in_section=0; last_entry_line=0; header_line=0 }
-                    $0 == hdr { in_section=1; header_line=NR }
-                    in_section && /^\[path / && $0 != hdr { in_section=0 }
-                    in_section && /^[^#\[]/ && NF { last_entry_line=NR }
-                    { lines[NR]=$0 }
-                    END {
-                        insert_after = (last_entry_line > 0) ? last_entry_line : header_line
-                        for (i=1; i<=NR; i++) {
-                            print lines[i]
-                            if (i==insert_after) print entry
-                        }
-                    }
-                ' "$CONF" > "$tmp" && mv "$tmp" "$CONF" || { rm -f "$tmp"; echo "  [ERROR] Failed to update conf"; continue; }
-            else
-                printf "\n%s\n%s\n" "$section_header_tilde" "$dir  $owner_repo" >> "$CONF"
-            fi
-
-            echo "  [ADDED] $dir  $owner_repo"
-            known["$owner_repo"]=1
-            added=$((added + 1))
-
+            printf "%s\t%s\t%s\t%s\t%s\n" \
+                "$owner_repo" "$dir" "$search_dir" "$repo_path" "$remote"
         done < <(find "$search_dir" -name ".git" -type d -prune 2>/dev/null | sort)
     done
+}
+
+# ── Scout: dispatcher (fzf if present, else interactive prompt) ───
+scout_repos() {
+    local candidates
+    candidates="$(scout_collect_candidates)"
+
+    if [[ -z "$candidates" ]]; then
+        echo "[OK] All repos are already tracked in repos.conf."
+        return 0
+    fi
+
+    if command -v fzf &>/dev/null; then
+        scout_fzf "$candidates"
+    else
+        scout_prompt "$candidates"
+    fi
+}
+
+scout_fzf() {
+    local candidates="$1"
+    local total
+    total="$(printf "%s\n" "$candidates" | wc -l | tr -d ' ')"
+    echo "[INFO] Found $total untracked repo(s). TAB to multi-select, ENTER to add." >&2
+
+    local preview
+    preview='
+path={4}
+echo "Repo:    {1}"
+echo "Dir:     {2}"
+echo "Section: {3}"
+echo "Path:    $path"
+echo "Remote:  {5}"
+echo
+echo "Recent commits:"
+git -C "$path" log --oneline -5 2>/dev/null
+echo
+if [ -f "$path/README.md" ]; then
+    echo "README:"
+    head -15 "$path/README.md"
+fi
+'
+
+    local selected
+    if ! selected="$(printf "%s\n" "$candidates" \
+        | fzf --multi --delimiter=$'\t' --with-nth=1,2 \
+              --preview "$preview" --preview-window='right,60%,wrap' \
+              --header='TAB: select  ENTER: add selected to repos.conf')"; then
+        echo "[OK] No candidates selected."
+        return 0
+    fi
+    [[ -z "$selected" ]] && { echo "[OK] No candidates selected."; return 0; }
+
+    local added=0
+    while IFS=$'\t' read -r owner_repo dir search_dir repo_path remote; do
+        [[ -z "$owner_repo" ]] && continue
+        if scout_insert_entry "$search_dir" "$dir" "$owner_repo"; then
+            echo "[ADDED] $dir  $owner_repo"
+            added=$((added + 1))
+        else
+            echo "[ERROR] Failed to add $owner_repo" >&2
+        fi
+    done <<< "$selected"
 
     echo ""
-    if [[ "$found" -eq 0 ]]; then
-        echo "[OK] All repos are already tracked in repos.conf."
-    elif [[ "$added" -eq 0 ]]; then
+    if [[ "$added" -eq 0 ]]; then
+        echo "[OK] $total untracked repo(s) found, none added."
+    else
+        echo "[DONE] Added $added of $total untracked repo(s) to repos.conf."
+        echo "[HINT] Try: git-seed --browse"
+    fi
+}
+
+scout_prompt() {
+    local candidates="$1"
+    local found=0 added=0
+
+    while IFS=$'\t' read -r owner_repo dir search_dir repo_path remote; do
+        found=$((found + 1))
+        echo ""
+        echo "  Found:  $owner_repo"
+        echo "  Path:   $repo_path"
+        [[ -n "$remote" ]] && echo "  Remote: $remote"
+
+        printf "  Add to repos.conf under '%s'? [y/N] " "$dir"
+        local answer; read -r answer </dev/tty
+        [[ ! "$answer" =~ ^[Yy]$ ]] && continue
+
+        if scout_insert_entry "$search_dir" "$dir" "$owner_repo"; then
+            echo "  [ADDED] $dir  $owner_repo"
+            added=$((added + 1))
+        else
+            echo "  [ERROR] Failed to update conf" >&2
+        fi
+    done <<< "$candidates"
+
+    echo ""
+    if [[ "$added" -eq 0 ]]; then
         echo "[OK] $found untracked repo(s) found, none added."
     else
         echo "[DONE] Added $added of $found untracked repo(s) to repos.conf."
+        echo "[HINT] Try: git-seed --browse"
     fi
 }
 
@@ -296,23 +549,43 @@ usage() {
     cat <<EOF
 Usage: git-seed <command> [options]
 
-Commands:
-  --sync        Clone missing repos and pull existing ones
-  --clone-only  Clone missing repos, skip existing
-  --pull-only   Pull existing repos, skip missing
-  --scout       Scan paths defined in conf for untracked git repos and
-                interactively offer to add them
-  --status      Show cloned/missing/dirty state for all repos in conf
-  --list        List your GitHub repos via gh CLI (requires gh auth login)
-                Outputs lines ready to paste into repos.conf
+Manifest commands:
+  --sync           Clone missing repos and pull existing ones
+  --clone-only     Clone missing repos, skip existing
+  --pull-only      Pull existing repos, skip missing
+  --scout          Scan paths defined in conf for untracked git repos and
+                   interactively offer to add them (multi-select fzf if present)
+  --status         Show cloned/missing/dirty state for all repos in conf
+  --list           List your GitHub repos via gh CLI (requires gh auth login)
+                   Outputs lines ready to paste into repos.conf
+
+Frontend commands:
+  --pick           fzf picker over tracked, cloned repos. Prints path on stdout.
+  --browse         fzf picker with preview (commits, status, README).
+                   Prints selected path on stdout.
+  --where <repo>   Look up the local path for owner/repo (or basename).
+                   Prints path on stdout.
+  --recent [N]     List N most-recently-committed tracked repos (default 20).
+                   One path per line.
+  --dirty          List tracked repos with uncommitted changes.
+                   One path per line.
+  --open [editor]  Run --browse, then open the selection in editor.
+                   Editor defaults: \$EDITOR, then code, then vim.
 
 Options:
-  --dry-run     Print what would happen without making any changes
-                (works with --sync, --clone-only, --pull-only)
-  --conf FILE   Use a specific config file
-  --base DIR    Fallback base dir for entries with no [path] section
-                (default: ~/git-seed-repos)
-  --help        Show this message
+  --dry-run        Print what would happen without making any changes
+                   (works with --sync, --clone-only, --pull-only)
+  --conf FILE      Use a specific config file
+  --base DIR       Fallback base dir for entries with no [path] section
+                   (default: ~/git-seed-repos)
+  --help           Show this message
+
+Composition examples:
+  cd "\$(git-seed --pick)"
+  cd "\$(git-seed --browse)"
+  \$EDITOR "\$(git-seed --where pdbeard/intermcli)"
+  git-seed --dirty | xargs -I{} git -C {} status -s
+  git-seed --recent 5
 
 Config file lookup order:
   1. --conf FILE
@@ -333,6 +606,9 @@ EOF
 [[ $# -eq 0 ]] && usage && exit 0
 
 COMMAND=""
+WHERE_REPO=""
+RECENT_N=20
+OPEN_EDITOR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -342,14 +618,30 @@ while [[ $# -gt 0 ]]; do
         --scout)       COMMAND="scout" ;;
         --status)      COMMAND="status" ;;
         --list)        COMMAND="list" ;;
+        --pick)        COMMAND="pick" ;;
+        --browse)      COMMAND="browse" ;;
+        --where)       [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --where requires a repo argument" >&2; exit 1; }
+                       COMMAND="where"; WHERE_REPO="$2"; shift ;;
+        --where=*)     COMMAND="where"; WHERE_REPO="${1#--where=}"
+                       [[ -z "$WHERE_REPO" ]] && { echo "[ERROR] --where requires a repo argument" >&2; exit 1; } ;;
+        --recent)      COMMAND="recent"
+                       if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+                           [[ "$2" =~ ^[0-9]+$ ]] || { echo "[ERROR] --recent expects a positive integer, got: $2" >&2; exit 1; }
+                           RECENT_N="$2"; shift
+                       fi ;;
+        --dirty)       COMMAND="dirty" ;;
+        --open)        COMMAND="open"
+                       if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+                           OPEN_EDITOR="$2"; shift
+                       fi ;;
         --dry-run)     DRY_RUN=true ;;
-        --conf)        [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --conf requires a file argument"; exit 1; }
+        --conf)        [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --conf requires a file argument" >&2; exit 1; }
                        CONF="$2"; shift ;;
-        --conf=*)      CONF="${1#--conf=}"; [[ -z "$CONF" ]] && { echo "[ERROR] --conf requires a file argument"; exit 1; } ;;
+        --conf=*)      CONF="${1#--conf=}"; [[ -z "$CONF" ]] && { echo "[ERROR] --conf requires a file argument" >&2; exit 1; } ;;
         --base)        BASE_DIR="$2"; shift ;;
         --base=*)      BASE_DIR="${1#--base=}" ;;
         --help)        usage; exit 0 ;;
-        *)             echo "[ERROR] Unknown option: $1"; usage; exit 1 ;;
+        *)             echo "[ERROR] Unknown option: $1" >&2; usage; exit 1 ;;
     esac
     shift
 done
@@ -365,4 +657,10 @@ case "$COMMAND" in
                  echo ""
                  echo "  cloned: $STATUS_CLONED  missing: $STATUS_MISSING  dirty: $STATUS_DIRTY" ;;
     list)        list_repos ;;
+    pick)        pick_repo ;;
+    browse)      browse_repos ;;
+    where)       where_repo "$WHERE_REPO" ;;
+    recent)      recent_repos "$RECENT_N" ;;
+    dirty)       dirty_repos ;;
+    open)        open_repo "$OPEN_EDITOR" ;;
 esac
