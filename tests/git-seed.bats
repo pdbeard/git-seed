@@ -97,6 +97,23 @@ teardown() {
     [[ "$output" == *"requires a file argument"* ]]
 }
 
+# ── conf entry sanitisation ───────────────────────────────────────────
+
+@test "trailing slash on repo entry is stripped and resolves correctly" {
+    # Write a conf entry with a trailing slash on the repo name
+    printf "[path %s]\npersonal  pdbeard/alpha/\n" "$REPO_BASE" > "$SANDBOX/slash.conf"
+    run "$SEED" --conf "$SANDBOX/slash.conf" --where pdbeard/alpha
+    [ "$status" -eq 0 ]
+    [ "$output" = "$REPO_BASE/personal/alpha" ]
+}
+
+@test "trailing whitespace on repo entry is stripped and resolves correctly" {
+    printf "[path %s]\npersonal  pdbeard/alpha   \n" "$REPO_BASE" > "$SANDBOX/ws.conf"
+    run "$SEED" --conf "$SANDBOX/ws.conf" --where pdbeard/alpha
+    [ "$status" -eq 0 ]
+    [ "$output" = "$REPO_BASE/personal/alpha" ]
+}
+
 # ── --status ──────────────────────────────────────────────────────────
 
 @test "--status shows OK for clean repo" {
@@ -108,6 +125,12 @@ teardown() {
 @test "--status shows DIRTY for modified repo" {
     run "$SEED" --conf "$CONF" --status
     [[ "$output" == *"[DIRTY]"*"beta"* ]]
+}
+
+@test "--status shows DIRTY for repo with untracked files only" {
+    echo "untracked" > "$REPO_BASE/personal/alpha/newfile.txt"
+    run "$SEED" --conf "$CONF" --status
+    [[ "$output" == *"[DIRTY]"*"alpha"* ]]
 }
 
 @test "--status shows MISSING for absent repo" {
@@ -235,6 +258,17 @@ EOF
     run "$SEED" --conf "$CONF" --sync --dry-run
     [ "$status" -eq 0 ]
     [[ "$output" == *"[DRY]"* ]]
+}
+
+@test "--sync hints about --browse on completion" {
+    run "$SEED" --conf "$CONF" --sync --dry-run
+    [[ "$output" == *"--browse"* ]]
+}
+
+@test "--clone-only hints about --browse on completion" {
+    run "$SEED" --conf "$CONF" --clone-only
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--browse"* ]]
 }
 
 @test "--clone-only skips repos that already exist" {

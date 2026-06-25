@@ -66,6 +66,7 @@ parse_conf() {
 
         local dir repo
         read -r dir repo <<< "$line"
+        repo="${repo%%[[:space:]/]}"
         [[ -z "$dir" || -z "$repo" ]] && continue
 
         if [[ "$repo" != */* ]]; then
@@ -160,8 +161,7 @@ do_status() {
     if [[ ! -d "$dest" ]]; then
         printf "[MISSING] %s\n" "$repo"
         STATUS_MISSING=$((STATUS_MISSING + 1))
-    elif ! git -C "$dest" diff --quiet 2>/dev/null || \
-         ! git -C "$dest" diff --cached --quiet 2>/dev/null; then
+    elif is_dirty "$dest"; then
         printf "[DIRTY]   %s\n" "$repo"
         STATUS_DIRTY=$((STATUS_DIRTY + 1))
         STATUS_CLONED=$((STATUS_CLONED + 1))
@@ -192,8 +192,7 @@ is_dirty() {
 
 # ── Picker shared by --browse / --open ───────────────────────────
 # Reads "label<TAB>path" lines on stdin, prints the chosen path to stdout.
-# Uses fzf if present, otherwise a numbered prompt.
-# $1: fzf preview command (empty string disables preview).
+# Uses fzf with preview if present, otherwise a numbered prompt.
 pick_select() {
     local preview="$1"
     local lines
@@ -205,15 +204,10 @@ pick_select() {
 
     local selected=""
     if command -v fzf &>/dev/null; then
-        if [[ -n "$preview" ]]; then
-            selected="$(printf "%s\n" "$lines" \
-                | fzf --delimiter=$'\t' --with-nth=1 \
-                      --preview "$preview" \
-                      --preview-window='right,60%,wrap')" || return 1
-        else
-            selected="$(printf "%s\n" "$lines" \
-                | fzf --delimiter=$'\t' --with-nth=1)" || return 1
-        fi
+        selected="$(printf "%s\n" "$lines" \
+            | fzf --delimiter=$'\t' --with-nth=1 \
+                  --preview "$preview" \
+                  --preview-window='right,60%,wrap')" || return 1
     else
         local -a arr=()
         while IFS= read -r _line; do
@@ -646,8 +640,12 @@ done
 [[ -z "$COMMAND" ]] && usage && exit 0
 
 case "$COMMAND" in
-    sync)        parse_conf do_sync ;;
-    clone-only)  CLONE_ONLY=true;  parse_conf do_sync ;;
+    sync)        parse_conf do_sync
+                 echo ""
+                 echo "[HINT] Try: git-seed --browse" ;;
+    clone-only)  CLONE_ONLY=true;  parse_conf do_sync
+                 echo ""
+                 echo "[HINT] Try: git-seed --browse" ;;
     pull-only)   PULL_ONLY=true;   parse_conf do_sync ;;
     scout)       scout_repos ;;
     status)      parse_conf do_status
