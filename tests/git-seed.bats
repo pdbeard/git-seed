@@ -210,6 +210,28 @@ teardown() {
     [[ "$output" == *"positive integer"* ]]
 }
 
+@test "--recent --mine filters to repos with commits by git user.email" {
+    local email
+    email="$(git config --global user.email 2>/dev/null || true)"
+    [ -z "$email" ] && skip "git user.email not configured"
+
+    # alpha has a commit by test@test.com; add a commit by the real user to beta
+    git -C "$REPO_BASE/work/beta" -c user.email="$email" -c user.name=Test \
+        commit -qm "mine" --allow-empty
+
+    run "$SEED" --conf "$CONF" --recent --mine
+    [ "$status" -eq 0 ]
+    # beta should appear (has a commit by current user); alpha may or may not
+    [[ "$output" == *"beta"* ]]
+}
+
+@test "--recent --mine exits 1 when git user.email is not configured" {
+    run env HOME="$SANDBOX" GIT_CONFIG_NOSYSTEM=1 \
+        "$SEED" --conf "$CONF" --recent --mine
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"user.email"* ]]
+}
+
 # ── --browse ──────────────────────────────────────────────────────────
 
 @test "--browse returns a valid path" {
@@ -260,14 +282,19 @@ EOF
     [[ "$output" == *"[DRY]"* ]]
 }
 
-@test "--sync hints about --browse on completion" {
+@test "--sync --dry-run suppresses browse hint" {
     run "$SEED" --conf "$CONF" --sync --dry-run
-    [[ "$output" == *"--browse"* ]]
+    [[ "$output" != *"--browse"* ]]
 }
 
 @test "--clone-only hints about --browse on completion" {
     run "$SEED" --conf "$CONF" --clone-only
     [ "$status" -eq 0 ]
+    [[ "$output" == *"--browse"* ]]
+}
+
+@test "--pull-only hints about --browse on completion" {
+    run "$SEED" --conf "$CONF" --pull-only
     [[ "$output" == *"--browse"* ]]
 }
 
@@ -299,6 +326,23 @@ EOF
     run "$SEED" --conf "$CONF" --pull-only
     [ "$status" -eq 0 ]
     [[ "$output" == *"[PULL]"*"alpha"* ]]
+}
+
+@test "--sync skips repo on detached HEAD instead of erroring" {
+    git -C "$REPO_BASE/personal/alpha" checkout -q \
+        "$(git -C "$REPO_BASE/personal/alpha" rev-parse HEAD)"
+    run "$SEED" --conf "$CONF" --pull-only
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[SKIP]"*"alpha"* ]]
+    [[ "$output" == *"detached HEAD"* ]]
+}
+
+@test "--sync tracks error count and warns when a pull fails" {
+    # Point alpha's origin at a non-existent path so pull fails
+    git -C "$REPO_BASE/personal/alpha" remote set-url origin "file:///nonexistent"
+    run "$SEED" --conf "$CONF" --pull-only
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[WARN]"*"failed to sync"* ]]
 }
 
 # ── --scout ───────────────────────────────────────────────────────────
@@ -341,4 +385,29 @@ EOF
         "$SEED" --conf "$CONF" --list
     [ "$status" -eq 1 ]
     [[ "$output" == *"gh"* ]]
+}
+
+@test "--list --dir uses custom directory label in output" {
+    # Create a mock gh that returns a known repo
+    cat > "$SANDBOX/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "pdbeard/testrepo"
+EOF
+    chmod +x "$SANDBOX/bin/gh"
+
+    run "$SEED" --conf "$CONF" --list --dir work
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"work  pdbeard/testrepo"* ]]
+}
+
+@test "--list defaults to 'projects' as directory label" {
+    cat > "$SANDBOX/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "pdbeard/testrepo"
+EOF
+    chmod +x "$SANDBOX/bin/gh"
+
+    run "$SEED" --conf "$CONF" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"projects  pdbeard/testrepo"* ]]
 }

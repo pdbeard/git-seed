@@ -17,6 +17,9 @@ BASE_DIR="${BASE_DIR:-$HOME/git-seed-repos}"
 DRY_RUN=false
 CLONE_ONLY=false
 PULL_ONLY=false
+RECENT_MINE=false
+LIST_DIR="projects"
+SYNC_ERRORS=0
 
 # ── Auth ──────────────────────────────────────────────────────────
 _TOKEN=""
@@ -119,8 +122,16 @@ do_sync() {
         if [[ "$DRY_RUN" == true ]]; then
             echo "[DRY]   would pull $repo"
         else
+            if ! git -C "$dest" symbolic-ref HEAD &>/dev/null; then
+                echo "[SKIP]  $repo (detached HEAD — checkout a branch to pull)"
+                return
+            fi
             echo "[PULL]  $repo"
-            git -C "$dest" pull || { echo "[ERROR] Failed to pull $repo"; return 1; }
+            git -C "$dest" pull || {
+                echo "[ERROR] Failed to pull $repo"
+                SYNC_ERRORS=$((SYNC_ERRORS + 1))
+                return 1
+            }
         fi
         return
     fi
@@ -143,9 +154,17 @@ do_sync() {
 
     if [[ -n "$token" ]]; then
         git -c "credential.helper=!f() { echo username=x-access-token; echo password=$token; }; f" \
-            clone "$url" "$dest" || { echo "[ERROR] Failed to clone $repo"; return 1; }
+            clone "$url" "$dest" || {
+                echo "[ERROR] Failed to clone $repo"
+                SYNC_ERRORS=$((SYNC_ERRORS + 1))
+                return 1
+            }
     else
-        git clone "$url" "$dest" || { echo "[ERROR] Failed to clone $repo"; return 1; }
+        git clone "$url" "$dest" || {
+            echo "[ERROR] Failed to clone $repo"
+            SYNC_ERRORS=$((SYNC_ERRORS + 1))
+            return 1
+        }
     fi
 }
 
@@ -294,9 +313,23 @@ where_repo() {
 # ── --recent ──────────────────────────────────────────────────────
 recent_repos() {
     local n="$1"
+    local author_filter=""
+    if [[ "$RECENT_MINE" == true ]]; then
+        author_filter="$(git config --global user.email 2>/dev/null \
+            || git config user.email 2>/dev/null || true)"
+        if [[ -z "$author_filter" ]]; then
+            echo "[ERROR] --mine requires git user.email to be configured" >&2
+            return 1
+        fi
+    fi
+
     emit_existing | while IFS=$'\t' read -r r p; do
         local ts
-        ts="$(git -C "$p" log -1 --format=%ct 2>/dev/null || true)"
+        if [[ -n "$author_filter" ]]; then
+            ts="$(git -C "$p" log -1 --author="$author_filter" --format=%ct 2>/dev/null || true)"
+        else
+            ts="$(git -C "$p" log -1 --format=%ct 2>/dev/null || true)"
+        fi
         [[ -z "$ts" ]] && ts=0
         printf "%s\t%s\n" "$ts" "$p"
     done | sort -rn | head -n "$n" | cut -f2
@@ -535,7 +568,7 @@ list_repos() {
     fi
     echo "# Paste into repos.conf:"
     gh repo list --limit 200 --json nameWithOwner --jq '.[].nameWithOwner' | \
-        awk '{ print "projects  " $0 }'
+        awk -v dir="$LIST_DIR" '{ print dir "  " $0 }'
 }
 
 # ── Usage ─────────────────────────────────────────────────────────
@@ -560,6 +593,8 @@ Frontend commands:
                    Prints path on stdout.
   --recent [N]     List N most-recently-committed tracked repos (default 20).
                    One path per line.
+  --mine           Modifier for --recent: only count commits by your
+                   git user.email (shows repos you actively work in).
   --dirty          List tracked repos with uncommitted changes.
                    One path per line.
   --open [editor]  Run --browse, then open the selection in editor.
@@ -568,6 +603,7 @@ Frontend commands:
 Options:
   --dry-run        Print what would happen without making any changes
                    (works with --sync, --clone-only, --pull-only)
+  --dir <label>    Directory label for --list output (default: projects)
   --conf FILE      Use a specific config file
   --base DIR       Fallback base dir for entries with no [path] section
                    (default: ~/git-seed-repos)
@@ -620,12 +656,16 @@ while [[ $# -gt 0 ]]; do
                            [[ "$2" =~ ^[0-9]+$ ]] || { echo "[ERROR] --recent expects a positive integer, got: $2" >&2; exit 1; }
                            RECENT_N="$2"; shift
                        fi ;;
+        --mine)        RECENT_MINE=true ;;
         --dirty)       COMMAND="dirty" ;;
         --open)        COMMAND="open"
                        if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
                            OPEN_EDITOR="$2"; shift
                        fi ;;
         --dry-run)     DRY_RUN=true ;;
+        --dir)         [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --dir requires a label argument" >&2; exit 1; }
+                       LIST_DIR="$2"; shift ;;
+        --dir=*)       LIST_DIR="${1#--dir=}"; [[ -z "$LIST_DIR" ]] && { echo "[ERROR] --dir requires a label argument" >&2; exit 1; } ;;
         --conf)        [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --conf requires a file argument" >&2; exit 1; }
                        CONF="$2"; shift ;;
         --conf=*)      CONF="${1#--conf=}"; [[ -z "$CONF" ]] && { echo "[ERROR] --conf requires a file argument" >&2; exit 1; } ;;
@@ -642,11 +682,16 @@ done
 case "$COMMAND" in
     sync)        parse_conf do_sync
                  echo ""
-                 echo "[HINT] Try: git-seed --browse" ;;
+                 if [[ "$SYNC_ERRORS" -gt 0 ]]; then echo "[WARN]  $SYNC_ERRORS repo(s) failed to sync"; fi
+                 if [[ "$DRY_RUN" == false ]]; then echo "[HINT] Try: git-seed --browse"; fi ;;
     clone-only)  CLONE_ONLY=true;  parse_conf do_sync
                  echo ""
-                 echo "[HINT] Try: git-seed --browse" ;;
-    pull-only)   PULL_ONLY=true;   parse_conf do_sync ;;
+                 if [[ "$SYNC_ERRORS" -gt 0 ]]; then echo "[WARN]  $SYNC_ERRORS repo(s) failed to sync"; fi
+                 if [[ "$DRY_RUN" == false ]]; then echo "[HINT] Try: git-seed --browse"; fi ;;
+    pull-only)   PULL_ONLY=true;   parse_conf do_sync
+                 echo ""
+                 if [[ "$SYNC_ERRORS" -gt 0 ]]; then echo "[WARN]  $SYNC_ERRORS repo(s) failed to sync"; fi
+                 if [[ "$DRY_RUN" == false ]]; then echo "[HINT] Try: git-seed --browse"; fi ;;
     scout)       scout_repos ;;
     status)      parse_conf do_status
                  echo ""
