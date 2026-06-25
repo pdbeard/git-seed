@@ -187,20 +187,6 @@ teardown() {
     [[ "$output" == *"positive integer"* ]]
 }
 
-# ── --pick ────────────────────────────────────────────────────────────
-
-@test "--pick returns a valid path" {
-    run "$SEED" --conf "$CONF" --pick
-    [ "$status" -eq 0 ]
-    [[ "$output" == "$REPO_BASE"* ]]
-    [ -d "$output" ]
-}
-
-@test "--pick exits 1 when selection is cancelled" {
-    FZF_MOCK=cancel run "$SEED" --conf "$CONF" --pick
-    [ "$status" -eq 1 ]
-}
-
 # ── --browse ──────────────────────────────────────────────────────────
 
 @test "--browse returns a valid path" {

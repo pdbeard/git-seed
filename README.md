@@ -58,7 +58,6 @@ Manifest commands:
                    Outputs lines ready to paste into repos.conf
 
 Frontend commands:
-  --pick           fzf picker over tracked, cloned repos. Prints path on stdout.
   --browse         fzf picker with preview (commits, status, README).
                    Prints selected path on stdout.
   --where <repo>   Look up the local path for owner/repo (or basename).
@@ -82,7 +81,6 @@ Options:
 Frontend commands are designed to compose with other shell tools:
 
 ```bash
-cd "$(git-seed --pick)"
 cd "$(git-seed --browse)"
 $EDITOR "$(git-seed --where pdbeard/intermcli)"
 git-seed --dirty | xargs -I{} git -C {} status -s
@@ -101,5 +99,5 @@ git-seed uses authentication in the following order:
 
 - bash 4.3+
 - git
-- `fzf` (optional, used by `--pick`, `--browse`, `--open`, and `--scout` for richer interactive UI; everything degrades to numbered prompts without it)
+- `fzf` (optional, used by `--browse`, `--open`, and `--scout` for richer interactive UI; everything degrades to numbered prompts without it)
 - `gh` CLI (optional, required for `--list` and token auth)

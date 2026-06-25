@@ -190,7 +190,7 @@ is_dirty() {
     [[ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]]
 }
 
-# ── Picker shared by --pick / --browse / --open ───────────────────
+# ── Picker shared by --browse / --open ───────────────────────────
 # Reads "label<TAB>path" lines on stdin, prints the chosen path to stdout.
 # Uses fzf if present, otherwise a numbered prompt.
 # $1: fzf preview command (empty string disables preview).
@@ -236,11 +236,6 @@ pick_select() {
 
     [[ -z "$selected" ]] && return 1
     printf "%s\n" "$selected" | cut -f2
-}
-
-# ── --pick ────────────────────────────────────────────────────────
-pick_repo() {
-    emit_existing | pick_select ""
 }
 
 # ── --browse ──────────────────────────────────────────────────────
@@ -560,7 +555,6 @@ Manifest commands:
                    Outputs lines ready to paste into repos.conf
 
 Frontend commands:
-  --pick           fzf picker over tracked, cloned repos. Prints path on stdout.
   --browse         fzf picker with preview (commits, status, README).
                    Prints selected path on stdout.
   --where <repo>   Look up the local path for owner/repo (or basename).
@@ -581,7 +575,6 @@ Options:
   --help           Show this message
 
 Composition examples:
-  cd "\$(git-seed --pick)"
   cd "\$(git-seed --browse)"
   \$EDITOR "\$(git-seed --where pdbeard/intermcli)"
   git-seed --dirty | xargs -I{} git -C {} status -s
@@ -618,7 +611,6 @@ while [[ $# -gt 0 ]]; do
         --scout)       COMMAND="scout" ;;
         --status)      COMMAND="status" ;;
         --list)        COMMAND="list" ;;
-        --pick)        COMMAND="pick" ;;
         --browse)      COMMAND="browse" ;;
         --where)       [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --where requires a repo argument" >&2; exit 1; }
                        COMMAND="where"; WHERE_REPO="$2"; shift ;;
@@ -657,7 +649,6 @@ case "$COMMAND" in
                  echo ""
                  echo "  cloned: $STATUS_CLONED  missing: $STATUS_MISSING  dirty: $STATUS_DIRTY" ;;
     list)        list_repos ;;
-    pick)        pick_repo ;;
     browse)      browse_repos ;;
     where)       where_repo "$WHERE_REPO" ;;
     recent)      recent_repos "$RECENT_N" ;;
