@@ -241,26 +241,27 @@ pick_select() {
 # ── --browse ──────────────────────────────────────────────────────
 browse_preview_cmd() {
     cat <<'EOF'
-path={2}
-echo "Repo:   {1}"
-echo "Path:   $path"
-echo "Remote: $(git -C "$path" remote get-url origin 2>/dev/null)"
+rrepo={1}
+rpath={2}
+echo "Repo:   $rrepo"
+echo "Path:   $rpath"
+echo "Remote: $(git -C "$rpath" remote get-url origin 2>/dev/null)"
 echo
-status=$(git -C "$path" status --porcelain 2>/dev/null)
-if [ -n "$status" ]; then
-    n=$(printf "%s\n" "$status" | wc -l | tr -d ' ')
+git_status=$(git -C "$rpath" status --porcelain 2>/dev/null)
+if [ -n "$git_status" ]; then
+    n=$(printf "%s\n" "$git_status" | wc -l | tr -d ' ')
     echo "Status: dirty ($n changes)"
-    printf "%s\n" "$status" | head -5 | sed 's/^/  /'
+    printf "%s\n" "$git_status" | head -5 | sed 's/^/  /'
 else
     echo "Status: clean"
 fi
 echo
 echo "Recent commits:"
-git -C "$path" log --oneline -10 2>/dev/null
+git -C "$rpath" log --oneline -10 2>/dev/null
 echo
-if [ -f "$path/README.md" ]; then
+if [ -f "$rpath/README.md" ]; then
     echo "README:"
-    head -20 "$path/README.md"
+    head -20 "$rpath/README.md"
 fi
 EOF
 }
@@ -450,19 +451,22 @@ scout_fzf() {
 
     local preview
     preview='
-path={4}
-echo "Repo:    {1}"
-echo "Dir:     {2}"
-echo "Section: {3}"
-echo "Path:    $path"
+rrepo={1}
+rdir={2}
+rsec={3}
+rpath={4}
+echo "Repo:    $rrepo"
+echo "Dir:     $rdir"
+echo "Section: $rsec"
+echo "Path:    $rpath"
 echo "Remote:  {5}"
 echo
 echo "Recent commits:"
-git -C "$path" log --oneline -5 2>/dev/null
+git -C "$rpath" log --oneline -5 2>/dev/null
 echo
-if [ -f "$path/README.md" ]; then
+if [ -f "$rpath/README.md" ]; then
     echo "README:"
-    head -15 "$path/README.md"
+    head -15 "$rpath/README.md"
 fi
 '
 
