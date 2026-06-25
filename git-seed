@@ -396,6 +396,7 @@ scout_collect_candidates() {
 
     for search_dir in "${!search_paths[@]}"; do
         [[ ! -d "$search_dir" ]] && continue
+        printf "[INFO] Scanning %s...\n" "${search_dir/#$HOME/\~}" >&2
 
         while IFS= read -r gitdir; do
             local repo_path="${gitdir%/.git}"
