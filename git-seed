@@ -181,7 +181,7 @@ do_emit() {
 # Emit only entries whose local clone exists.
 emit_existing() {
     parse_conf do_emit | while IFS=$'\t' read -r r p; do
-        [[ -d "$p" ]] && printf "%s\t%s\n" "$r" "$p"
+        if [[ -d "$p" ]]; then printf "%s\t%s\n" "$r" "$p"; fi
     done
 }
 
@@ -315,7 +315,7 @@ recent_repos() {
 # ── --dirty ───────────────────────────────────────────────────────
 dirty_repos() {
     emit_existing | while IFS=$'\t' read -r r p; do
-        is_dirty "$p" && printf "%s\n" "$p"
+        if is_dirty "$p"; then printf "%s\n" "$p"; fi
     done
 }
 
