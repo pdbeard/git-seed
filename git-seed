@@ -130,7 +130,8 @@ get_conf_paths() {
 # ── Sync callback (clone missing, pull existing) ──────────────────
 do_sync() {
     local base_dir="$1" dir="$2" repo="$3"
-    local dest="$base_dir/$dir/$(basename "$repo")"
+    local dest
+    dest="$base_dir/$dir/$(basename "$repo")"
 
     if [[ -d "$dest" ]]; then
         if [[ "$CLONE_ONLY" == true ]]; then
@@ -205,7 +206,8 @@ STATUS_DIRTY=0
 
 do_status() {
     local base_dir="$1" dir="$2" repo="$3"
-    local dest="$base_dir/$dir/$(basename "$repo")"
+    local dest
+    dest="$base_dir/$dir/$(basename "$repo")"
 
     if [[ ! -d "$dest" ]]; then
         printf "[MISSING] %s\n" "$repo"
@@ -412,7 +414,7 @@ scout_insert_entry() {
     if [[ -n "$section_header" ]]; then
         local tmp
         tmp="$(mktemp)"
-        awk -v hdr="$section_header" -v entry="$dir  $owner_repo" '
+        if awk -v hdr="$section_header" -v entry="$dir  $owner_repo" '
             BEGIN { in_section=0; last_entry_line=0; header_line=0 }
             $0 == hdr { in_section=1; header_line=NR }
             in_section && /^\[path / && $0 != hdr { in_section=0 }
@@ -425,7 +427,15 @@ scout_insert_entry() {
                     if (i==insert_after) print entry
                 }
             }
-        ' "$CONF" > "$tmp" && mv "$tmp" "$CONF" || { rm -f "$tmp"; return 1; }
+        ' "$CONF" > "$tmp"; then
+            if ! mv "$tmp" "$CONF"; then
+                rm -f "$tmp"
+                return 1
+            fi
+        else
+            rm -f "$tmp"
+            return 1
+        fi
     else
         printf "\n%s\n%s\n" "$section_header_tilde" "$dir  $owner_repo" >> "$CONF"
     fi
@@ -512,6 +522,9 @@ scout_fzf() {
     total="$(printf "%s\n" "$candidates" | wc -l | tr -d ' ')"
     echo "[INFO] Found $total untracked repo(s). TAB to multi-select, ENTER to add." >&2
 
+    # Single quotes are deliberate: {1}..{5} are substituted by fzf, and the
+    # shell variables below must be expanded by the preview subshell, not here.
+    # shellcheck disable=SC2016
     local preview
     preview='
 rrepo={1}

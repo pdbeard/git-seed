@@ -137,3 +137,7 @@ shellcheck git-seed  # lint
 ```
 
 Both run in CI on push and pull request.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
