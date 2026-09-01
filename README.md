@@ -36,11 +36,22 @@ libs          someuser/a-library
 
 Each `[path]` section sets the base directory for the entries below it. The subdirectory is relative to that path. Entries above any `[path]` section fall back to `~/git-seed-repos`.
 
+Lines beginning with `#` are ignored, as is anything after a `#` on an entry line —
+so entries can be annotated:
+
+```
+personal      youruser/your-repo   # main project
+```
+
 Config file is looked up in this order:
 
 1. `--conf FILE`
-2. `~/.config/git-seed/repos.conf` (or `$XDG_CONFIG_HOME/git-seed/repos.conf`)
-3. `<script dir>/repos.conf`
+2. `$CONF_FILE` environment variable
+3. `~/.config/git-seed/repos.conf` (or `$XDG_CONFIG_HOME/git-seed/repos.conf`)
+4. `<script dir>/repos.conf`
+
+The fallback base directory for entries above any `[path]` section is `--base DIR`,
+then `$BASE_DIR`, then `~/git-seed-repos`.
 
 ## Usage
 
@@ -73,8 +84,13 @@ Options:
   --conf FILE      Use a specific config file
   --base DIR       Fallback base dir for entries with no [path] section
                    (default: ~/git-seed-repos)
+  --version        Print the version and exit
   --help           Show this message
 ```
+
+Options apply only to the commands they belong to. `git-seed --status --dry-run`
+is an error, not a silent no-op, and two commands in one invocation
+(`--sync --status`) is also an error.
 
 ### Composition
 
@@ -101,3 +117,23 @@ git-seed uses authentication in the following order:
 - git
 - `fzf` (optional, used by `--browse`, `--open`, and `--scout` for richer interactive UI; everything degrades to numbered prompts without it)
 - `gh` CLI (optional, required for `--list` and token auth)
+
+## Known limitations
+
+- **Token visibility.** Cloning a private repo passes the token through a
+  `git -c credential.helper=...` argument, which is briefly visible in the process
+  list to other users on the same machine. This is acceptable on a personal machine;
+  on a shared host, clone over SSH remotes instead.
+- **Serial git calls.** `--status`, `--dirty`, and `--recent` invoke git once per
+  repo, sequentially. Fine interactively; noticeable on large manifests.
+- **Tabs and newlines in paths.** Repo paths containing either will corrupt
+  tab-delimited output. Not escaped.
+
+## Development
+
+```bash
+bats tests/          # run the test suite
+shellcheck git-seed  # lint
+```
+
+Both run in CI on push and pull request.

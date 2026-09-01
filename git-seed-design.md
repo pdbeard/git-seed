@@ -152,6 +152,38 @@ with its own interface and does not need to call them.
 
 ---
 
+## Performance consideration: serial git calls
+
+**The problem.** `--status`, `--dirty`, and `--recent` shell out to git once per repo,
+sequentially. `--status` runs `git status --porcelain` for every cloned entry; on a
+cold cache with a large manifest this takes seconds.
+
+This is fine for a command a person runs occasionally. It is not obviously fine for a
+widget polling `--status --tsv` on a timer, which is the motivation for the whole v2
+surface. A poll that takes three seconds cannot run every second, and a poll that
+spawns two git processes per repo per tick is a meaningful background load.
+
+**Measure before designing around it.** The cost is unknown at present — it has not
+been benchmarked against a realistic manifest. Time `--status` at the manifest size
+you actually expect before choosing any of the following:
+
+- **Do nothing.** If a full poll is comfortably under the intended refresh interval,
+  there is no problem to solve. Most likely outcome for manifests of a few dozen repos.
+- **Parallelise.** `xargs -P` over the per-repo check. Cheap in effort, but reorders
+  output, so `do_status` would need to collect and sort rather than print as it goes.
+- **Let the caller poll less.** Push the problem to the UI: poll on a long interval,
+  refresh a single repo with `--sync --repo <name>` on demand. Costs nothing here.
+- **Cache.** A state file with mtime-based invalidation. Most effective, and by far the
+  most complexity and the most ways to be subtly wrong. Avoid unless measurement
+  proves it necessary.
+
+**Bearing on `--tsv`.** None directly — the flag changes formatting, not the number of
+git invocations. But it is the feature that turns this from a non-issue into a
+question, because it is the feature that invites polling. Worth answering before the
+widget is built, since the answer could change what the widget asks for.
+
+---
+
 ## Implementation order
 
 1. `--tsv` — unblocks UI development immediately; self-contained change to

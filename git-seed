@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+VERSION="1.0.0"
+
 # ── Config ────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 XDG_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/git-seed/repos.conf"
@@ -62,15 +64,27 @@ parse_conf() {
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line// }" ]]           && continue
 
+        # Strip inline comments before anything else; an annotation must
+        # never become part of a path or a repo name. '#' is not valid in
+        # either, so this is unambiguous.
+        line="${line%%#*}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" ]] && continue
+
         if [[ "$line" =~ ^\[path[[:space:]]+(.+)\]$ ]]; then
             current_base="${BASH_REMATCH[1]/#\~/$HOME}"
             continue
         fi
 
-        local dir repo
-        read -r dir repo <<< "$line"
-        repo="${repo%%[[:space:]/]}"
+        local dir repo extra
+        read -r dir repo extra <<< "$line"
+        # Strip any run of trailing whitespace and slashes.
+        repo="${repo%"${repo##*[![:space:]/]}"}"
         [[ -z "$dir" || -z "$repo" ]] && continue
+
+        if [[ -n "$extra" ]]; then
+            echo "[WARN]  Ignoring extra fields after '$repo' in: $line" >&2
+        fi
 
         if [[ "$repo" != */* ]]; then
             echo "[WARN]  Skipping malformed entry: $line" >&2
@@ -94,6 +108,10 @@ get_conf_paths() {
     while IFS= read -r line; do
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line// }" ]]           && continue
+
+        line="${line%%#*}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" ]] && continue
 
         if [[ "$line" =~ ^\[path[[:space:]]+(.+)\]$ ]]; then
             seen_path_section=true
@@ -165,6 +183,18 @@ do_sync() {
             SYNC_ERRORS=$((SYNC_ERRORS + 1))
             return 1
         }
+    fi
+}
+
+# Shared tail for --sync / --clone-only / --pull-only.
+run_sync() {
+    parse_conf do_sync
+    echo ""
+    if [[ "$SYNC_ERRORS" -gt 0 ]]; then
+        echo "[WARN]  $SYNC_ERRORS repo(s) failed to sync"
+    fi
+    if [[ "$DRY_RUN" == false ]]; then
+        echo "[HINT] Try: git-seed --browse"
     fi
 }
 
@@ -415,8 +445,13 @@ scout_collect_candidates() {
             local stripped="${line#\#}"
             stripped="${stripped#"${stripped%%[! ]*}"}"
             [[ "$stripped" =~ ^\[path ]] && continue
-            local _ repo
-            read -r _ repo <<< "$stripped"
+            # Commented-out entries still count as known, so scout does not
+            # re-offer a repo the user deliberately disabled. Inline comments
+            # are dropped so they don't end up inside the repo name.
+            stripped="${stripped%%#*}"
+            local label repo rest
+            read -r label repo rest <<< "$stripped"
+            repo="${repo%"${repo##*[![:space:]/]}"}"
             [[ -n "$repo" && "$repo" == */* ]] && known["$repo"]=1
         done < "$CONF"
     fi
@@ -607,7 +642,11 @@ Options:
   --conf FILE      Use a specific config file
   --base DIR       Fallback base dir for entries with no [path] section
                    (default: ~/git-seed-repos)
+  --version        Print the version and exit
   --help           Show this message
+
+Options only apply to the commands noted above; using one elsewhere is an
+error rather than a silent no-op.
 
 Composition examples:
   cd "\$(git-seed --browse)"
@@ -637,40 +676,52 @@ COMMAND=""
 WHERE_REPO=""
 RECENT_N=20
 OPEN_EDITOR=""
+DIR_SET=false
+
+# Reject a second command rather than silently honouring the last one.
+set_command() {
+    if [[ -n "$COMMAND" && "$COMMAND" != "$1" ]]; then
+        echo "[ERROR] Conflicting commands: --$COMMAND and --$1" >&2
+        exit 1
+    fi
+    COMMAND="$1"
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --sync)        COMMAND="sync" ;;
-        --clone-only)  COMMAND="clone-only" ;;
-        --pull-only)   COMMAND="pull-only" ;;
-        --scout)       COMMAND="scout" ;;
-        --status)      COMMAND="status" ;;
-        --list)        COMMAND="list" ;;
-        --browse)      COMMAND="browse" ;;
+        --sync)        set_command sync ;;
+        --clone-only)  set_command clone-only ;;
+        --pull-only)   set_command pull-only ;;
+        --scout)       set_command scout ;;
+        --status)      set_command status ;;
+        --list)        set_command list ;;
+        --browse)      set_command browse ;;
         --where)       [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --where requires a repo argument" >&2; exit 1; }
-                       COMMAND="where"; WHERE_REPO="$2"; shift ;;
-        --where=*)     COMMAND="where"; WHERE_REPO="${1#--where=}"
+                       set_command where; WHERE_REPO="$2"; shift ;;
+        --where=*)     set_command where; WHERE_REPO="${1#--where=}"
                        [[ -z "$WHERE_REPO" ]] && { echo "[ERROR] --where requires a repo argument" >&2; exit 1; } ;;
-        --recent)      COMMAND="recent"
+        --recent)      set_command recent
                        if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
                            [[ "$2" =~ ^[0-9]+$ ]] || { echo "[ERROR] --recent expects a positive integer, got: $2" >&2; exit 1; }
                            RECENT_N="$2"; shift
                        fi ;;
         --mine)        RECENT_MINE=true ;;
-        --dirty)       COMMAND="dirty" ;;
-        --open)        COMMAND="open"
+        --dirty)       set_command dirty ;;
+        --open)        set_command open
                        if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
                            OPEN_EDITOR="$2"; shift
                        fi ;;
         --dry-run)     DRY_RUN=true ;;
         --dir)         [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --dir requires a label argument" >&2; exit 1; }
-                       LIST_DIR="$2"; shift ;;
-        --dir=*)       LIST_DIR="${1#--dir=}"; [[ -z "$LIST_DIR" ]] && { echo "[ERROR] --dir requires a label argument" >&2; exit 1; } ;;
+                       LIST_DIR="$2"; DIR_SET=true; shift ;;
+        --dir=*)       LIST_DIR="${1#--dir=}"; DIR_SET=true; [[ -z "$LIST_DIR" ]] && { echo "[ERROR] --dir requires a label argument" >&2; exit 1; } ;;
         --conf)        [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --conf requires a file argument" >&2; exit 1; }
                        CONF="$2"; shift ;;
         --conf=*)      CONF="${1#--conf=}"; [[ -z "$CONF" ]] && { echo "[ERROR] --conf requires a file argument" >&2; exit 1; } ;;
-        --base)        BASE_DIR="$2"; shift ;;
-        --base=*)      BASE_DIR="${1#--base=}" ;;
+        --base)        [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --base requires a directory argument" >&2; exit 1; }
+                       BASE_DIR="$2"; shift ;;
+        --base=*)      BASE_DIR="${1#--base=}"; [[ -z "$BASE_DIR" ]] && { echo "[ERROR] --base requires a directory argument" >&2; exit 1; } ;;
+        --version)     echo "git-seed $VERSION"; exit 0 ;;
         --help)        usage; exit 0 ;;
         *)             echo "[ERROR] Unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -679,19 +730,27 @@ done
 
 [[ -z "$COMMAND" ]] && usage && exit 0
 
+# Reject flags that would otherwise be accepted and silently ignored.
+if [[ "$RECENT_MINE" == true && "$COMMAND" != "recent" ]]; then
+    echo "[ERROR] --mine only applies to --recent" >&2
+    exit 1
+fi
+if [[ "$DIR_SET" == true && "$COMMAND" != "list" ]]; then
+    echo "[ERROR] --dir only applies to --list" >&2
+    exit 1
+fi
+if [[ "$DRY_RUN" == true ]]; then
+    case "$COMMAND" in
+        sync|clone-only|pull-only) ;;
+        *) echo "[ERROR] --dry-run only applies to --sync, --clone-only and --pull-only" >&2
+           exit 1 ;;
+    esac
+fi
+
 case "$COMMAND" in
-    sync)        parse_conf do_sync
-                 echo ""
-                 if [[ "$SYNC_ERRORS" -gt 0 ]]; then echo "[WARN]  $SYNC_ERRORS repo(s) failed to sync"; fi
-                 if [[ "$DRY_RUN" == false ]]; then echo "[HINT] Try: git-seed --browse"; fi ;;
-    clone-only)  CLONE_ONLY=true;  parse_conf do_sync
-                 echo ""
-                 if [[ "$SYNC_ERRORS" -gt 0 ]]; then echo "[WARN]  $SYNC_ERRORS repo(s) failed to sync"; fi
-                 if [[ "$DRY_RUN" == false ]]; then echo "[HINT] Try: git-seed --browse"; fi ;;
-    pull-only)   PULL_ONLY=true;   parse_conf do_sync
-                 echo ""
-                 if [[ "$SYNC_ERRORS" -gt 0 ]]; then echo "[WARN]  $SYNC_ERRORS repo(s) failed to sync"; fi
-                 if [[ "$DRY_RUN" == false ]]; then echo "[HINT] Try: git-seed --browse"; fi ;;
+    sync)        run_sync ;;
+    clone-only)  CLONE_ONLY=true;  run_sync ;;
+    pull-only)   PULL_ONLY=true;   run_sync ;;
     scout)       scout_repos ;;
     status)      parse_conf do_status
                  echo ""

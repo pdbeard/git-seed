@@ -411,3 +411,94 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"projects  pdbeard/testrepo"* ]]
 }
+
+# ── Manifest parsing edge cases ───────────────────────────────────────
+
+@test "inline comment is stripped from repo entry" {
+    echo "extra  pdbeard/gamma  # annotated" >> "$CONF"
+    run "$SEED" --conf "$CONF" --sync --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"would clone pdbeard/gamma"* ]]
+    [[ "$output" != *"annotated"* ]]
+}
+
+@test "inline comment does not leak into the clone path" {
+    echo "extra  pdbeard/gamma  # annotated" >> "$CONF"
+    run "$SEED" --conf "$CONF" --sync --dry-run
+    [[ "$output" == *"/extra/gamma"* ]]
+}
+
+@test "inline comment on a [path] section is stripped" {
+    cat > "$CONF" <<EOF
+[path $REPO_BASE]  # where things live
+personal  pdbeard/alpha
+EOF
+    run "$SEED" --conf "$CONF" --status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[OK]"* ]]
+}
+
+@test "multiple trailing slashes are stripped from repo entry" {
+    cat > "$CONF" <<EOF
+[path $REPO_BASE]
+personal  pdbeard/alpha//
+EOF
+    run "$SEED" --conf "$CONF" --status
+    [[ "$output" == *"[OK]      pdbeard/alpha"* ]]
+}
+
+@test "extra fields in an entry produce a warning" {
+    echo "extra  pdbeard/gamma  stray" >> "$CONF"
+    run "$SEED" --conf "$CONF" --status
+    [[ "$output" == *"Ignoring extra fields"* ]]
+}
+
+@test "--scout does not re-offer a repo whose conf entry has an inline comment" {
+    echo "personal  pdbeard/untracked  # already tracked" >> "$CONF"
+    run "$SEED" --conf "$CONF" --scout
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"All repos are already tracked"* ]]
+}
+
+# ── Argument validation ───────────────────────────────────────────────
+
+@test "--base requires an argument" {
+    run "$SEED" --base
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--base requires a directory argument"* ]]
+}
+
+@test "conflicting commands exit 1" {
+    run "$SEED" --conf "$CONF" --sync --status
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Conflicting commands"* ]]
+}
+
+@test "repeating the same command is not a conflict" {
+    run "$SEED" --conf "$CONF" --status --status
+    [ "$status" -eq 0 ]
+}
+
+@test "--mine outside --recent exits 1" {
+    run "$SEED" --conf "$CONF" --status --mine
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--mine only applies to --recent"* ]]
+}
+
+@test "--dir outside --list exits 1" {
+    run "$SEED" --conf "$CONF" --status --dir work
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--dir only applies to --list"* ]]
+}
+
+@test "--dry-run outside the sync family exits 1" {
+    run "$SEED" --conf "$CONF" --status --dry-run
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--dry-run only applies"* ]]
+}
+
+@test "--version prints a version string" {
+    run "$SEED" --version
+    [ "$status" -eq 0 ]
+    [[ "$output" == git-seed\ * ]]
+}
