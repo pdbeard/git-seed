@@ -13,13 +13,13 @@ The single-file bash constraint and the design principles from v1 remain in forc
 
 ## Planned additions
 
-### 1. `--porcelain` — machine-readable status output
+### 1. `--tsv` — machine-readable status output
 
 **Motivation.** `--status` output is human-readable (`[OK]`, `[DIRTY]`, `[MISSING]`).
 A UI widget polling repo state needs structured data it can parse and bind without
 grepping bracket tags.
 
-**Behaviour.** A global `--porcelain` flag switches `--status` to tab-delimited output,
+**Behaviour.** A global `--tsv` flag switches `--status` to tab-delimited output,
 one repo per line:
 
 ```
@@ -37,11 +37,28 @@ testorg/beta    /Users/.../beta     dirty   3
 pdbeard/gamma   /Users/.../gamma    missing
 ```
 
-**Scope.** `--porcelain` only affects `--status` for now. Other commands already emit
+**Scope.** `--tsv` only affects `--status` for now. Other commands already emit
 path-per-line output suitable for programmatic use.
 
-**Non-goal.** Full JSON output. The tab-delimited format is simpler to produce in bash
-and trivially parseable in any language or shell pipeline.
+**Naming.** `--porcelain` was considered first, by analogy with `git status
+--porcelain`. Rejected in favour of `--tsv`: git's plumbing/porcelain split describes
+a real two-layer architecture that git-seed does not have, so the term would be
+borrowed as a bare convention rather than as a description. `--tsv` says what the
+output actually is and is legible without git trivia. The stability promise that
+`--porcelain` carries by convention is stated explicitly below instead.
+
+**Stability.** Once a UI parses this format, the column order and the `status`
+vocabulary are fixed. New columns may only be appended to the right.
+
+**Caveat.** A repo path containing a literal tab or newline would corrupt a row. This
+is not escaped; such paths are considered out of scope.
+
+**Deferred: `--json`.** Not rejected outright, but deferred until a consumer actually
+needs it. Producing correct JSON in bash means hand-rolling string escaping — `jq`
+cannot be assumed present, and paths may contain quotes or backslashes. TSV is
+trivially parseable in any language, so JSON earns its escaping bug surface only when
+something concrete requires it. If added later, `--json` sits beside `--tsv` as a
+sibling flag; no `--format=<x>` machinery until a third format exists.
 
 ---
 
@@ -123,7 +140,7 @@ The intended usage pattern for a QuickShell widget or similar:
 
 | Widget action | git-seed call |
 |---|---|
-| List all repos with state | `--status --porcelain` |
+| List all repos with state | `--status --tsv` |
 | Pull one repo | `--sync --repo <name>` |
 | Open one repo in editor | `--open --repo <name>` |
 | Add a repo by name | `--add <owner/repo> --dir <dir>` |
@@ -137,7 +154,7 @@ with its own interface and does not need to call them.
 
 ## Implementation order
 
-1. `--porcelain` — unblocks UI development immediately; self-contained change to
+1. `--tsv` — unblocks UI development immediately; self-contained change to
    `do_status`.
 2. `--repo` targeting — enables all per-repo UI actions; single change to
    `parse_conf` / `emit_existing`.
