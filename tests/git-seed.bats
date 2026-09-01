@@ -53,6 +53,13 @@ esac
 EOF
     chmod +x "$SANDBOX/bin/fzf"
 
+    # Tests that pin PATH to system dirs would otherwise resolve
+    # /usr/bin/env bash to macOS's bash 3.2, which git-seed refuses to run
+    # under. Keep a 4.3+ bash reachable from the sandbox.
+    ln -sf "$(command -v bash)" "$SANDBOX/bin/bash"
+    # /bin has no dirname, which git-seed needs before it does anything else.
+    ln -sf "$(command -v dirname)" "$SANDBOX/bin/dirname"
+
     export PATH="$SANDBOX/bin:$PATH"
     export CONF SANDBOX REPO_BASE
 }
@@ -268,7 +275,7 @@ EOF
 @test "--open exits 1 when no editor found and EDITOR unset" {
     # /bin contains bash but not vim or code; /usr/bin/env can find bash via /bin.
     # Stripping homebrew and /usr/bin ensures no vim or code fallback is found.
-    run env PATH="/bin:$SANDBOX/bin" HOME="$HOME" CONF="$CONF" \
+    run env PATH="$SANDBOX/bin:/bin" HOME="$HOME" CONF="$CONF" \
         "$SEED" --conf "$CONF" --open
     [ "$status" -eq 1 ]
     [[ "$output" == *"No editor found"* ]]
@@ -501,4 +508,147 @@ EOF
     run "$SEED" --version
     [ "$status" -eq 0 ]
     [[ "$output" == git-seed\ * ]]
+}
+
+# ── Repo states: BROKEN / AHEAD / detail column ───────────────────────
+
+_make_upstream_repo() {
+    # Creates a bare origin plus a clone with a real tracking branch.
+    local origin="$1" clone="$2"
+    git init -q --bare "$origin"
+    git clone -q "$origin" "$clone" 2>/dev/null
+    git -C "$clone" -c user.email=test@test.com -c user.name=Test \
+        commit -q --allow-empty -m base
+    git -C "$clone" push -q origin HEAD:refs/heads/main
+    git -C "$clone" checkout -q -B main
+    git -C "$clone" branch -q --set-upstream-to=origin/main main
+}
+
+@test "--status reports BROKEN for a non-empty directory that is not a repo" {
+    mkdir -p "$REPO_BASE/work/notrepo"
+    echo hello > "$REPO_BASE/work/notrepo/file.txt"
+    echo "work  x/notrepo" >> "$CONF"
+    run "$SEED" --conf "$CONF" --status
+    [[ "$output" == *"[BROKEN]"* ]]
+    [[ "$output" == *"not a git repo"* ]]
+    [[ "$output" == *"broken: 1"* ]]
+}
+
+@test "--status reports an empty directory as MISSING, not BROKEN" {
+    mkdir -p "$REPO_BASE/work/emptydir"
+    echo "work  x/emptydir" >> "$CONF"
+    run "$SEED" --conf "$CONF" --status
+    [[ "$output" == *"[MISSING] x/emptydir"* ]]
+    [[ "$output" != *"[BROKEN]"* ]]
+}
+
+@test "--sync refuses to touch a path that is not a git repo" {
+    mkdir -p "$REPO_BASE/work/notrepo"
+    echo hello > "$REPO_BASE/work/notrepo/file.txt"
+    echo "work  x/notrepo" >> "$CONF"
+    run "$SEED" --conf "$CONF" --sync
+    [[ "$output" == *"path exists but is not a git repo"* ]]
+    # The user's file must survive untouched.
+    [ -f "$REPO_BASE/work/notrepo/file.txt" ]
+}
+
+@test "frontend commands skip broken directories" {
+    mkdir -p "$REPO_BASE/work/notrepo"
+    echo hello > "$REPO_BASE/work/notrepo/file.txt"
+    echo "work  x/notrepo" >> "$CONF"
+    run "$SEED" --conf "$CONF" --recent
+    [[ "$output" != *"notrepo"* ]]
+}
+
+@test "--status reports AHEAD for a clean repo with unpushed commits" {
+    _make_upstream_repo "$SANDBOX/origin.git" "$REPO_BASE/personal/ahead"
+    git -C "$REPO_BASE/personal/ahead" -c user.email=test@test.com \
+        -c user.name=Test commit -q --allow-empty -m unpushed
+    echo "personal  x/ahead" >> "$CONF"
+    run "$SEED" --conf "$CONF" --status
+    [[ "$output" == *"[AHEAD]"* ]]
+    [[ "$output" == *"1 unpushed"* ]]
+    [[ "$output" == *"ahead: 1"* ]]
+}
+
+@test "a dirty repo with unpushed commits reports DIRTY plus both counts" {
+    _make_upstream_repo "$SANDBOX/origin.git" "$REPO_BASE/personal/both"
+    git -C "$REPO_BASE/personal/both" -c user.email=test@test.com \
+        -c user.name=Test commit -q --allow-empty -m unpushed
+    echo scratch > "$REPO_BASE/personal/both/untracked.txt"
+    echo "personal  x/both" >> "$CONF"
+    run "$SEED" --conf "$CONF" --status
+    [[ "$output" == *"[DIRTY]"* ]]
+    [[ "$output" == *"1 change, 1 unpushed"* ]]
+}
+
+@test "--status stays OK and notes when no upstream is configured" {
+    run "$SEED" --conf "$CONF" --status
+    [[ "$output" == *"[OK]"* ]]
+    [[ "$output" == *"no upstream"* ]]
+    [[ "$output" == *"ahead: 0"* ]]
+}
+
+@test "a pushed repo with nothing local reports OK with no detail" {
+    _make_upstream_repo "$SANDBOX/origin.git" "$REPO_BASE/personal/clean"
+    cat > "$CONF" <<EOF
+[path $REPO_BASE]
+personal  x/clean
+EOF
+    run "$SEED" --conf "$CONF" --status
+    [[ "$output" == *"[OK]      x/clean"* ]]
+    [[ "$output" != *"unpushed"* ]]
+    [[ "$output" != *"no upstream"* ]]
+}
+
+# ── --outdated ────────────────────────────────────────────────────────
+
+@test "--outdated is silent when the remote has nothing new" {
+    _make_upstream_repo "$SANDBOX/origin.git" "$REPO_BASE/personal/up2date"
+    cat > "$CONF" <<EOF
+[path $REPO_BASE]
+personal  x/up2date
+EOF
+    run "$SEED" --conf "$CONF" --outdated
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"$REPO_BASE/personal/up2date"* ]]
+    [[ "$output" == *"needing pull: 0"* ]]
+}
+
+@test "--outdated lists a repo whose remote has new commits" {
+    _make_upstream_repo "$SANDBOX/origin.git" "$REPO_BASE/personal/behind"
+    # Push a commit from a second clone so 'behind' has not seen it.
+    git clone -q -b main "$SANDBOX/origin.git" "$SANDBOX/other" 2>/dev/null
+    git -C "$SANDBOX/other" -c user.email=test@test.com -c user.name=Test \
+        commit -q --allow-empty -m "upstream work"
+    git -C "$SANDBOX/other" push -q origin HEAD:refs/heads/main
+    cat > "$CONF" <<EOF
+[path $REPO_BASE]
+personal  x/behind
+EOF
+    run "$SEED" --conf "$CONF" --outdated
+    [[ "$output" == *"$REPO_BASE/personal/behind"* ]]
+    [[ "$output" == *"needing pull: 1"* ]]
+}
+
+@test "--outdated does not update remote-tracking refs" {
+    _make_upstream_repo "$SANDBOX/origin.git" "$REPO_BASE/personal/behind"
+    git clone -q -b main "$SANDBOX/origin.git" "$SANDBOX/other" 2>/dev/null
+    git -C "$SANDBOX/other" -c user.email=test@test.com -c user.name=Test \
+        commit -q --allow-empty -m "upstream work"
+    git -C "$SANDBOX/other" push -q origin HEAD:refs/heads/main
+    local before
+    before="$(git -C "$REPO_BASE/personal/behind" rev-parse origin/main)"
+    cat > "$CONF" <<EOF
+[path $REPO_BASE]
+personal  x/behind
+EOF
+    run "$SEED" --conf "$CONF" --outdated
+    [ "$(git -C "$REPO_BASE/personal/behind" rev-parse origin/main)" = "$before" ]
+}
+
+@test "--outdated skips repos with no upstream" {
+    run "$SEED" --conf "$CONF" --outdated
+    [[ "$output" == *"no upstream: 2"* ]]
+    [[ "$output" == *"checked: 0"* ]]
 }

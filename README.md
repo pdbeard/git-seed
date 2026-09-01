@@ -75,6 +75,9 @@ Frontend commands:
                    Prints path on stdout.
   --recent [N]     List N most-recently-committed tracked repos (default 20).
   --dirty          List tracked repos with uncommitted changes.
+  --outdated       Check each remote for commits you have not pulled.
+                   Requires network access. Prints one path per repo
+                   that needs a pull; summary goes to stderr.
   --open [editor]  Run --browse, then open the selection in editor.
                    Editor defaults: $EDITOR, then code, then vim.
 
@@ -103,6 +106,49 @@ git-seed --dirty | xargs -I{} git -C {} status -s
 git-seed --recent 5
 ```
 
+## Repo states
+
+`--status` reports one of five mutually exclusive states per repo, checked in
+this order:
+
+| State | Meaning |
+|---|---|
+| `MISSING` | No clone. The path is absent, or present but empty. `--sync` will fix it. |
+| `BROKEN` | The path is occupied by something that is not a git repo. git-seed will not touch it. |
+| `DIRTY` | Uncommitted changes in the working tree. |
+| `AHEAD` | Tree is clean, but commits are not yet pushed to the upstream. |
+| `OK` | Cloned, clean, nothing unpushed. |
+
+```
+[OK]      pdbeard/alpha
+[AHEAD]   pdbeard/beta                    2 unpushed
+[DIRTY]   pdbeard/gamma                   1 change, 1 unpushed
+[OK]      pdbeard/delta                   no upstream
+[BROKEN]  pdbeard/epsilon                 not a git repo: /home/p/projects/epsilon
+[MISSING] pdbeard/zeta
+
+  cloned: 4  missing: 1  broken: 1  dirty: 1  ahead: 1
+```
+
+Unpushed commits are shown for `DIRTY` repos too, in the detail column, so the
+count is never hidden behind the more urgent state.
+
+`--status` is entirely local and offline. It never contacts a remote, so it
+says nothing about commits other people have pushed. For that, use
+`--outdated`.
+
+### `--outdated`
+
+```bash
+git-seed --outdated                                # list repos needing a pull
+git-seed --outdated | xargs -I{} git -C {} pull    # pull them
+```
+
+Asks each remote directly whether the tracked branch has commits you do not
+have. It contacts the network but does not modify anything — remote-tracking
+refs are left alone, so `--status` output is unaffected. Repos with no
+configured upstream are skipped, since there is nothing for them to be behind.
+
 ## Authentication
 
 git-seed uses authentication in the following order:
@@ -113,7 +159,7 @@ git-seed uses authentication in the following order:
 
 ## Requirements
 
-- bash 4.3+
+- bash 4.3+ (enforced at startup; macOS ships 3.2 as `/bin/bash` — `brew install bash`)
 - git
 - `fzf` (optional, used by `--browse`, `--open`, and `--scout` for richer interactive UI; everything degrades to numbered prompts without it)
 - `gh` CLI (optional, required for `--list` and token auth)
@@ -126,6 +172,8 @@ git-seed uses authentication in the following order:
   on a shared host, clone over SSH remotes instead.
 - **Serial git calls.** `--status`, `--dirty`, and `--recent` invoke git once per
   repo, sequentially. Fine interactively; noticeable on large manifests.
+  `--outdated` additionally makes one network round trip per repo, which is why
+  it is a separate command rather than part of `--status`.
 - **Tabs and newlines in paths.** Repo paths containing either will corrupt
   tab-delimited output. Not escaped.
 

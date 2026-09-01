@@ -3,6 +3,14 @@ set -euo pipefail
 
 VERSION="1.0.0"
 
+# Associative arrays and 'local -n' namerefs need bash 4.3+. macOS ships
+# bash 3.2 as /bin/bash, where those fail with unrelated-looking errors.
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
+    echo "[ERROR] git-seed requires bash 4.3+ (found ${BASH_VERSION})" >&2
+    echo "        On macOS: brew install bash" >&2
+    exit 1
+fi
+
 # ── Config ────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 XDG_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/git-seed/repos.conf"
@@ -133,7 +141,14 @@ do_sync() {
     local dest
     dest="$base_dir/$dir/$(basename "$repo")"
 
-    if [[ -d "$dest" ]]; then
+    if [[ -d "$dest" ]] && ! is_empty_dir "$dest"; then
+        # Never clone into or over an occupied path that is not a clone;
+        # whatever is there belongs to the user.
+        if ! is_git_repo "$dest"; then
+            echo "[ERROR] $repo: path exists but is not a git repo: $dest"
+            SYNC_ERRORS=$((SYNC_ERRORS + 1))
+            return 1
+        fi
         if [[ "$CLONE_ONLY" == true ]]; then
             echo "[SKIP]  $repo (already exists)"
             return
@@ -200,25 +215,84 @@ run_sync() {
 }
 
 # ── Status callback ───────────────────────────────────────────────
+# States are mutually exclusive, evaluated in this order:
+#   MISSING  no clone (path absent, or present but empty)
+#   BROKEN   path occupied by something that is not a git repo
+#   DIRTY    uncommitted changes in the working tree
+#   AHEAD    tree clean, but commits are not yet on the upstream
+#   OK       cloned, clean, nothing unpushed
+# Unpushed commits are reported for DIRTY repos too, in the detail column,
+# so the count is never hidden by the more urgent state.
 STATUS_CLONED=0
 STATUS_MISSING=0
+STATUS_BROKEN=0
 STATUS_DIRTY=0
+STATUS_AHEAD=0
+
+# Builds the trailing detail string for a cloned repo, e.g.
+# "3 changes, 2 unpushed" or "no upstream". Empty when there is nothing to say.
+status_detail() {
+    local -a parts=()
+
+    if (( REPO_CHANGES == 1 )); then
+        parts+=("1 change")
+    elif (( REPO_CHANGES > 1 )); then
+        parts+=("$REPO_CHANGES changes")
+    fi
+
+    if (( REPO_AHEAD > 0 )); then
+        parts+=("$REPO_AHEAD unpushed")
+    fi
+
+    if [[ "$REPO_UPSTREAM" == false ]]; then
+        parts+=("no upstream")
+    fi
+
+    local out="" part
+    for part in "${parts[@]:-}"; do
+        [[ -z "$part" ]] && continue
+        [[ -n "$out" ]] && out+=", "
+        out+="$part"
+    done
+    printf "%s" "$out"
+}
 
 do_status() {
     local base_dir="$1" dir="$2" repo="$3"
     local dest
     dest="$base_dir/$dir/$(basename "$repo")"
 
-    if [[ ! -d "$dest" ]]; then
-        printf "[MISSING] %s\n" "$repo"
+    if [[ ! -d "$dest" ]] || is_empty_dir "$dest"; then
+        printf "%-10s%s\n" "[MISSING]" "$repo"
         STATUS_MISSING=$((STATUS_MISSING + 1))
-    elif is_dirty "$dest"; then
-        printf "[DIRTY]   %s\n" "$repo"
+        return
+    fi
+
+    if ! is_git_repo "$dest"; then
+        printf "%-10s%-32s%s\n" "[BROKEN]" "$repo" "not a git repo: $dest"
+        STATUS_BROKEN=$((STATUS_BROKEN + 1))
+        return
+    fi
+
+    STATUS_CLONED=$((STATUS_CLONED + 1))
+    inspect_repo "$dest"
+
+    local state detail
+    detail="$(status_detail)"
+    if (( REPO_CHANGES > 0 )); then
+        state="[DIRTY]"
         STATUS_DIRTY=$((STATUS_DIRTY + 1))
-        STATUS_CLONED=$((STATUS_CLONED + 1))
+    elif (( REPO_AHEAD > 0 )); then
+        state="[AHEAD]"
+        STATUS_AHEAD=$((STATUS_AHEAD + 1))
     else
-        printf "[OK]      %s\n" "$repo"
-        STATUS_CLONED=$((STATUS_CLONED + 1))
+        state="[OK]"
+    fi
+
+    if [[ -n "$detail" ]]; then
+        printf "%-10s%-32s%s\n" "$state" "$repo" "$detail"
+    else
+        printf "%-10s%s\n" "$state" "$repo"
     fi
 }
 
@@ -229,11 +303,63 @@ do_emit() {
     printf "%s\t%s/%s/%s\n" "$repo" "$base_dir" "$dir" "$(basename "$repo")"
 }
 
-# Emit only entries whose local clone exists.
+# Emit only entries backed by a real clone. Broken paths (a directory that
+# is not a git repo) are skipped so the frontend commands never treat one as
+# a healthy repo; --status reports them explicitly instead.
 emit_existing() {
     parse_conf do_emit | while IFS=$'\t' read -r r p; do
-        if [[ -d "$p" ]]; then printf "%s\t%s\n" "$r" "$p"; fi
+        if is_git_repo "$p"; then printf "%s\t%s\n" "$r" "$p"; fi
     done
+}
+
+# A clone, a worktree, or a submodule all have a .git entry; '-e' covers the
+# directory and the file form. Deliberately not 'git rev-parse --git-dir',
+# which walks up the tree and would report a parent repo's .git for a
+# directory that is not itself a clone.
+is_git_repo() {
+    [[ -e "$1/.git" ]]
+}
+
+is_empty_dir() {
+    local entries
+    entries="$(ls -A "$1" 2>/dev/null)"
+    [[ -z "$entries" ]]
+}
+
+# One 'git status --porcelain=v2 --branch' answers both questions we ask of a
+# clone, so inspecting a repo costs a single git invocation.
+#
+# Sets, for the caller:
+#   REPO_CHANGES  count of uncommitted changes (modified, unmerged, untracked)
+#   REPO_AHEAD    commits not yet on the upstream branch
+#   REPO_UPSTREAM true when an upstream is configured
+#
+# The '# branch.ab +N -M' header is absent when there is no upstream or HEAD
+# is detached; the behind count M is deliberately ignored, since it is only as
+# current as the last fetch. Use --outdated for a live answer.
+REPO_CHANGES=0
+REPO_AHEAD=0
+REPO_UPSTREAM=false
+
+inspect_repo() {
+    local path="$1" line
+    REPO_CHANGES=0
+    REPO_AHEAD=0
+    REPO_UPSTREAM=false
+
+    while IFS= read -r line; do
+        case "$line" in
+            "# branch.ab "*)
+                REPO_UPSTREAM=true
+                local ab ahead
+                ab="${line#\# branch.ab }"
+                ahead="${ab%% *}"
+                REPO_AHEAD="${ahead#+}"
+                ;;
+            "#"*) ;;
+            *) REPO_CHANGES=$((REPO_CHANGES + 1)) ;;
+        esac
+    done < <(git -C "$path" status --porcelain=v2 --branch 2>/dev/null)
 }
 
 is_dirty() {
@@ -396,6 +522,71 @@ open_repo() {
     exec "$editor" "$path"
 }
 
+# ── --outdated ────────────────────────────────────────────────────
+# Asks each remote whether it has commits we have not pulled.
+#
+# 'git fetch --dry-run' prints one line per ref that would be updated and
+# nothing at all when up to date, so emptiness is the whole answer — no output
+# parsing, and therefore no dependence on git's wording or the locale. It
+# contacts the network but does not update refs, so --status stays unaffected.
+outdated_repos() {
+    local token checked=0 behind=0 failed=0 skipped=0
+    token="$(get_token)"
+
+    while IFS=$'\t' read -r repo path; do
+        # Only the branch we actually track can be outdated. Without this the
+        # check fetches every ref, so an untracked stale branch elsewhere in
+        # the repo would report a pull the current branch does not need.
+        #
+        # The refspec must name a destination. A bare "refs/heads/x" fetches
+        # into FETCH_HEAD unconditionally and so always prints a line; with
+        # ":refs/remotes/<remote>/x" git compares against the tracking ref and
+        # stays silent when there is nothing new.
+        local upstream=""
+        upstream="$(git -C "$path" rev-parse --abbrev-ref \
+            --symbolic-full-name '@{upstream}' 2>/dev/null)" || upstream=""
+        if [[ -z "$upstream" ]]; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        local remote="${upstream%%/*}"
+        local branch="${upstream#*/}"
+        checked=$((checked + 1))
+
+        local out status=0
+        if [[ -n "$token" ]]; then
+            out="$(git -C "$path" \
+                -c "credential.helper=!f() { echo username=x-access-token; echo password=$token; }; f" \
+                fetch --dry-run "$remote" \
+                "refs/heads/$branch:refs/remotes/$remote/$branch" 2>&1)" || status=$?
+        else
+            out="$(git -C "$path" fetch --dry-run "$remote" \
+                "refs/heads/$branch:refs/remotes/$remote/$branch" 2>&1)" || status=$?
+        fi
+
+        if (( status != 0 )); then
+            echo "[ERROR] $repo: could not reach $remote" >&2
+            failed=$((failed + 1))
+            continue
+        fi
+
+        if [[ -n "$out" ]]; then
+            printf "%s\n" "$path"
+            behind=$((behind + 1))
+        fi
+    done < <(emit_existing)
+
+    echo "" >&2
+    printf "  checked: %d  needing pull: %d" "$checked" "$behind" >&2
+    if (( skipped > 0 )); then printf "  no upstream: %d" "$skipped" >&2; fi
+    if (( failed > 0 )); then printf "  unreachable: %d" "$failed" >&2; fi
+    printf "\n" >&2
+    if (( behind > 0 )); then
+        echo "[HINT] Try: git-seed --outdated | xargs -I{} git -C {} pull" >&2
+    fi
+}
+
 # ── Scout: insert helper ──────────────────────────────────────────
 # Adds "$dir  $owner_repo" under the matching [path "$search_dir"] section,
 # or appends a fresh section if one isn't there yet.
@@ -524,8 +715,8 @@ scout_fzf() {
 
     # Single quotes are deliberate: {1}..{5} are substituted by fzf, and the
     # shell variables below must be expanded by the preview subshell, not here.
-    # shellcheck disable=SC2016
     local preview
+    # shellcheck disable=SC2016
     preview='
 rrepo={1}
 rdir={2}
@@ -644,6 +835,9 @@ Frontend commands:
   --mine           Modifier for --recent: only count commits by your
                    git user.email (shows repos you actively work in).
   --dirty          List tracked repos with uncommitted changes.
+  --outdated       Check each remote for commits you have not pulled.
+                   Requires network access. Prints one path per repo
+                   that needs a pull; summary goes to stderr.
                    One path per line.
   --open [editor]  Run --browse, then open the selection in editor.
                    Editor defaults: \$EDITOR, then code, then vim.
@@ -720,6 +914,7 @@ while [[ $# -gt 0 ]]; do
                        fi ;;
         --mine)        RECENT_MINE=true ;;
         --dirty)       set_command dirty ;;
+        --outdated)    set_command outdated ;;
         --open)        set_command open
                        if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
                            OPEN_EDITOR="$2"; shift
@@ -767,11 +962,14 @@ case "$COMMAND" in
     scout)       scout_repos ;;
     status)      parse_conf do_status
                  echo ""
-                 echo "  cloned: $STATUS_CLONED  missing: $STATUS_MISSING  dirty: $STATUS_DIRTY" ;;
+                 printf "  cloned: %d  missing: %d" "$STATUS_CLONED" "$STATUS_MISSING"
+                 if [[ "$STATUS_BROKEN" -gt 0 ]]; then printf "  broken: %d" "$STATUS_BROKEN"; fi
+                 printf "  dirty: %d  ahead: %d\n" "$STATUS_DIRTY" "$STATUS_AHEAD" ;;
     list)        list_repos ;;
     browse)      browse_repos ;;
     where)       where_repo "$WHERE_REPO" ;;
     recent)      recent_repos "$RECENT_N" ;;
     dirty)       dirty_repos ;;
+    outdated)    outdated_repos ;;
     open)        open_repo "$OPEN_EDITOR" ;;
 esac

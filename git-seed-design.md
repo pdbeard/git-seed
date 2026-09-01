@@ -23,19 +23,26 @@ grepping bracket tags.
 one repo per line:
 
 ```
-owner/repo<TAB>path<TAB>status[<TAB>change_count]
+owner/repo<TAB>path<TAB>state<TAB>changes<TAB>unpushed
 ```
 
-- `status` is one of: `ok`, `dirty`, `missing`
-- `change_count` is only present when status is `dirty`
+- `state` is one of: `ok`, `ahead`, `dirty`, `broken`, `missing`
+- `changes` and `unpushed` are always present, `0` where not applicable, so the
+  column count is fixed and a parser never has to branch on field length
 
 Example:
 
 ```
-pdbeard/alpha   /Users/.../alpha    ok
-testorg/beta    /Users/.../beta     dirty   3
-pdbeard/gamma   /Users/.../gamma    missing
+pdbeard/alpha   /Users/.../alpha    ok      0   0
+testorg/beta    /Users/.../beta     dirty   3   1
+pdbeard/gamma   /Users/.../gamma    ahead   0   2
+pdbeard/delta   /Users/.../delta    broken  0   0
+pdbeard/zeta    /Users/.../zeta     missing 0   0
 ```
+
+The state vocabulary is defined by `--status`; see the Repo states table in the
+README. `behind` is deliberately absent — it cannot be known without contacting
+the remote, which `--status` never does. `--outdated` answers that question.
 
 **Scope.** `--tsv` only affects `--status` for now. Other commands already emit
 path-per-line output suitable for programmatic use.
@@ -47,8 +54,10 @@ borrowed as a bare convention rather than as a description. `--tsv` says what th
 output actually is and is legible without git trivia. The stability promise that
 `--porcelain` carries by convention is stated explicitly below instead.
 
-**Stability.** Once a UI parses this format, the column order and the `status`
-vocabulary are fixed. New columns may only be appended to the right.
+**Stability.** Once a UI parses this format, the column order and the `state`
+vocabulary are fixed. New columns may only be appended to the right. The five
+states were settled before any consumer existed, precisely so that adding one
+later is not a breaking change.
 
 **Caveat.** A repo path containing a literal tab or newline would corrupt a row. This
 is not escaped; such paths are considered out of scope.
@@ -176,6 +185,12 @@ you actually expect before choosing any of the following:
 - **Cache.** A state file with mtime-based invalidation. Most effective, and by far the
   most complexity and the most ways to be subtly wrong. Avoid unless measurement
   proves it necessary.
+
+**Update.** `--status` now gets dirty state and the unpushed count from a single
+`git status --porcelain=v2 --branch` per repo, so adding upstream awareness cost
+no additional invocations. The per-repo count is one git process, unchanged.
+Network checks live in `--outdated`, which is deliberately a separate,
+explicitly triggered command — the fast path stays offline.
 
 **Bearing on `--tsv`.** None directly — the flag changes formatting, not the number of
 git invocations. But it is the feature that turns this from a non-issue into a
