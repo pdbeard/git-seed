@@ -1,29 +1,51 @@
 # git-seed
 
-A bash script for managing multiple GitHub repositories across your machine. Clone, update, and discover repos from a simple config file.
+git-seed is a bash script that keeps a set of GitHub repositories on your computer
+up to date. You list the repositories in a config file. git-seed clones the missing
+repositories and pulls the cloned repositories. It also finds repositories that are
+not in the list.
 
-## Installation
+## Terms
 
-```bash
-git clone https://github.com/pdbeard/git-seed.git ~/dev/git-seed
-```
+This document uses these terms:
 
-Optionally add to your PATH:
+| Term | Meaning |
+|---|---|
+| repo | A GitHub repository. |
+| config file | The file `repos.conf`. It lists your repos. |
+| entry | A line in the config file that names a repo. |
+| listed repo | A repo that has an entry in the config file. |
+| unlisted repo | A git repo in a base directory that has no entry in the config file. `--scout` finds these repos. |
+| base directory | The directory that a `[path]` section sets. |
+| label | The first field of an entry. It is a subdirectory of the base directory. |
+| clone | The local copy of a repo. |
 
-```bash
-ln -s ~/dev/git-seed/git-seed ~/.local/bin/git-seed
-```
+## Install git-seed
 
-## Config
+1. Clone git-seed:
 
-Copy the example config and edit it:
+   ```bash
+   git clone https://github.com/pdbeard/git-seed.git ~/dev/git-seed
+   ```
 
-```bash
-mkdir -p ~/.config/git-seed
-cp repos.conf.example ~/.config/git-seed/repos.conf
-```
+2. Optional: put git-seed on your PATH:
 
-Config format:
+   ```bash
+   ln -s ~/dev/git-seed/git-seed ~/.local/bin/git-seed
+   ```
+
+## Make the config file
+
+1. Make the config directory, and copy the example config file into it:
+
+   ```bash
+   mkdir -p ~/.config/git-seed
+   cp repos.conf.example ~/.config/git-seed/repos.conf
+   ```
+
+2. Edit `~/.config/git-seed/repos.conf`. Add one entry for each repo.
+
+### Config file format
 
 ```
 [path ~/projects]
@@ -34,77 +56,87 @@ work          yourorg/their-repo
 libs          someuser/a-library
 ```
 
-Each `[path]` section sets the base directory for the entries below it. The subdirectory is relative to that path. Entries above any `[path]` section fall back to `~/git-seed-repos`.
+A `[path DIR]` section sets the base directory for the entries below it. Each entry
+has two fields: a label and `owner/repo`. git-seed clones the repo to
+`<base directory>/<label>/<repo name>`. For example, the first entry above clones to
+`~/projects/personal/your-repo`.
 
-`[path]` and `--base` must be absolute (or start with `~`). Any other line starting
-with `[` is an error, so a typo in a header can't file entries under the wrong section.
+Entries above all `[path]` sections use the fallback base directory. git-seed uses
+`--base DIR`, then `$BASE_DIR`, then `~/git-seed-repos`.
 
-Lines beginning with `#` are ignored, as is anything after a `#` on an entry line —
-so entries can be annotated:
+Rules:
 
-```
-personal      youruser/your-repo   # main project
-```
+- A base directory must be an absolute path, or start with `~/`.
+- A line that starts with `[` must be a `[path DIR]` section. For other lines that
+  start with `[`, git-seed stops with an error. A typo in a section header then
+  cannot put entries in the wrong base directory.
+- git-seed ignores lines that start with `#`. It also ignores the text after a `#`
+  on an entry line. You can use this to add notes:
 
-Config file is looked up in this order:
+  ```
+  personal      youruser/your-repo   # main project
+  ```
+
+### Config file location
+
+git-seed uses the first config file that it finds, in this order:
 
 1. `--conf FILE`
-2. `$CONF_FILE` environment variable
+2. The `$CONF_FILE` environment variable
 3. `~/.config/git-seed/repos.conf` (or `$XDG_CONFIG_HOME/git-seed/repos.conf`)
-4. `<script dir>/repos.conf`
-
-The fallback base directory for entries above any `[path]` section is `--base DIR`,
-then `$BASE_DIR`, then `~/git-seed-repos`.
+4. `<script directory>/repos.conf`
 
 ## Usage
 
 ```
 git-seed <command> [options]
 
-Manifest commands:
-  --sync           Clone missing repos and pull existing ones (fast-forward
-                   only). Exits 1 if any repo failed.
-  --clone-only     Clone missing repos, skip existing
-  --pull-only      Pull existing repos, skip missing
-  --scout          Scan paths defined in conf for untracked git repos and
-                   interactively offer to add them (multi-select fzf if present)
-  --status         Show cloned/missing/dirty state for all repos in conf
-  --list           List your GitHub repos via gh CLI (requires gh auth login)
-                   Outputs lines ready to paste into repos.conf
+Config commands:
+  --sync           Clone missing repos and pull cloned repos (fast-forward
+                   only). Exit with status 1 if a repo does not sync.
+  --clone-only     Clone missing repos. Do not pull cloned repos.
+  --pull-only      Pull cloned repos. Do not clone missing repos.
+  --scout          Find repos in the base directories that are not in the
+                   config file, and ask which to add. Use fzf if installed.
+  --status         Show the state of each repo in the config file.
+  --list           List your GitHub repos with the gh CLI. Each output line
+                   is ready to paste into the config file.
 
-Frontend commands:
-  --browse         fzf picker with preview (commits, status, README).
-                   Prints selected path on stdout.
-  --where <repo>   Look up the local path for owner/repo (or basename).
-                   Prints path on stdout.
-  --recent [N]     List N most-recently-committed tracked repos (default 20).
-  --mine           Modifier for --recent: only count commits by your
-                   git user.email (shows repos you actively work in).
-  --dirty          List tracked repos with uncommitted changes.
-  --outdated       Check each remote for commits you have not pulled.
-                   Requires network access. Prints one path per repo
-                   that needs a pull; summary goes to stderr.
-  --open [editor]  Run --browse, then open the selection in editor.
-                   Editor defaults: $EDITOR, then code, then vim.
+Path commands:
+  --browse         Select a repo in fzf, with a preview. Print its path.
+  --where <repo>   Print the path of a repo. Give owner/repo, or only the
+                   repo name if no other listed repo has that name.
+  --recent [N]     Print the paths of the N repos with the newest commits
+                   (default 20).
+  --mine           Use with --recent: count only commits by your git
+                   user.email.
+  --dirty          Print the paths of repos with uncommitted changes.
+  --outdated       Print the paths of repos whose remote has commits that you
+                   did not pull. Connect to each remote. Print a summary
+                   on stderr.
+  --open [editor]  Select a repo as --browse does, then open it in the
+                   editor. Default: $EDITOR, then code, then vim.
 
 Options:
-  --dry-run        Print what would happen without making any changes
-                   (works with --sync, --clone-only, --pull-only)
-  --dir <label>    Directory label for --list output (default: projects)
-  --conf FILE      Use a specific config file
-  --base DIR       Fallback base dir for entries with no [path] section
-                   (default: ~/git-seed-repos)
-  --version        Print the version and exit
-  --help           Show this message
+  --dry-run        Show the changes, but do not make them. Use with --sync,
+                   --clone-only or --pull-only.
+  --dir <label>    Label for the --list output (default: projects).
+  --conf FILE      Use this config file.
+  --base DIR       Base directory for entries above all [path] sections
+                   (default: ~/git-seed-repos).
+  --version        Print the version.
+  --help           Show this help.
 ```
 
-Options apply only to the commands they belong to. `git-seed --status --dry-run`
-is an error, not a silent no-op, and two commands in one invocation
-(`--sync --status`) is also an error.
+Some options work only with the commands that they name: `--dry-run`, `--dir` and
+`--mine`. With a different command, git-seed stops with an error. For example,
+`git-seed --status --dry-run` causes an error. Two commands together, for example
+`--sync --status`, also cause an error.
 
-### Composition
+### Use git-seed with other shell tools
 
-Frontend commands are designed to compose with other shell tools:
+The path commands print paths, one path on each line. You can give these paths to
+other shell tools:
 
 ```bash
 cd "$(git-seed --browse)"
@@ -115,16 +147,16 @@ git-seed --recent 5
 
 ## Repo states
 
-`--status` reports one of five mutually exclusive states per repo, checked in
-this order:
+`--status` shows one of five states for each repo. git-seed examines the states in
+this order, and it shows the first state that applies:
 
 | State | Meaning |
 |---|---|
-| `MISSING` | No clone. The path is absent, or present but empty. `--sync` will fix it. |
-| `BROKEN` | The path is occupied by something that is not a git repo. git-seed will not touch it. |
-| `DIRTY` | Uncommitted changes in the working tree. |
-| `AHEAD` | Tree is clean, but commits are not yet pushed to the upstream. |
-| `OK` | Cloned, clean, nothing unpushed. |
+| `MISSING` | The repo has no clone. The path does not exist, or it is an empty directory. `--sync` clones the repo. |
+| `BROKEN` | The path contains something that is not a git repo. git-seed does not change it. |
+| `DIRTY` | The working tree has uncommitted changes. |
+| `AHEAD` | The working tree is clean, but some commits are not on the upstream branch. |
+| `OK` | The repo is cloned and clean, and all commits are on the upstream branch. |
 
 ```
 [OK]      pdbeard/alpha
@@ -137,67 +169,73 @@ this order:
   cloned: 4  missing: 1  broken: 1  dirty: 1  ahead: 1
 ```
 
-Unpushed commits are shown for `DIRTY` repos too, in the detail column, so the
-count is never hidden behind the more urgent state.
+For a `DIRTY` repo, the detail column also shows the number of unpushed commits.
+The more urgent state does not hide this number.
 
-`--status` is entirely local and offline. It never contacts a remote, so it
-says nothing about commits other people have pushed. For that, use
-`--outdated`.
+`--status` does not connect to a remote. It does not show the commits that other
+people pushed. To find these commits, use `--outdated`.
 
 ### `--outdated`
 
 ```bash
-git-seed --outdated                                # list repos needing a pull
+git-seed --outdated                                          # list the repos to pull
 git-seed --outdated | xargs -I{} git -C {} pull --ff-only    # pull them
 ```
 
-Asks each remote directly whether the tracked branch has commits you do not
-have. It contacts the network but does not modify anything — remote-tracking
-refs are left alone, so `--status` output is unaffected. Repos with no
-configured upstream are skipped, since there is nothing for them to be behind.
+`--outdated` asks the remote of each repo if the upstream branch has commits that
+you do not have. It connects to the network, but it does not change your clones. It
+does not update the remote-tracking refs, so the `--status` output stays the same.
+`--outdated` skips repos that have no upstream branch.
 
 ## Authentication
 
-git-seed uses authentication in the following order:
+git-seed uses the first of these that is available:
 
-1. `GITHUB_TOKEN` environment variable
-2. `gh` CLI (`gh auth login`)
-3. No auth (public repos only)
+1. The `GITHUB_TOKEN` environment variable
+2. The token of the `gh` CLI (from `gh auth login`)
+3. No authentication. git-seed can then clone only public repos.
 
-The token is only ever offered to `https://github.com`, never to a remote on
-another host.
+git-seed gives the token only to `https://github.com`. It never gives the token to a
+remote on a different host. On github.com, the token has priority over other
+credential helpers, for example a keychain.
 
 ## Requirements
 
-- bash 4.3+ (enforced at startup; macOS ships 3.2 as `/bin/bash` — `brew install bash`)
-- git
-- `fzf` (optional, used by `--browse`, `--open`, and `--scout` for richer interactive UI; everything degrades to numbered prompts without it)
-- `gh` CLI (optional, required for `--list` and token auth)
+- bash 4.3 or later. On an earlier version, git-seed stops with an error. macOS has
+  bash 3.2 as `/bin/bash`. To install a newer bash, run `brew install bash`.
+- git.
+- `fzf` (optional). `--browse`, `--open` and `--scout` use fzf if it is installed.
+  If fzf is not installed, these commands show numbered prompts.
+- `gh` CLI (optional). `--list` needs it. git-seed can also get a token from it.
 
 ## Known limitations
 
-- **Token visibility.** Cloning a private repo passes the token through a
-  `git -c credential.helper=...` argument, which is briefly visible in the process
-  list to other users on the same machine. This is acceptable on a personal machine;
-  on a shared host, clone over SSH remotes instead.
-- **Serial git calls.** `--status`, `--dirty`, and `--recent` invoke git once per
-  repo, sequentially. Fine interactively; noticeable on large manifests.
-  `--outdated` additionally makes one network round trip per repo, which is why
-  it is a separate command rather than part of `--status`.
-- **Tabs and newlines in paths.** Repo paths containing either will corrupt
-  tab-delimited output. Not escaped.
-- **Spaces in subdirectory labels.** Config fields are whitespace-separated, so a
-  label like `my stuff` can't be written. `--scout` skips such folders with a warning.
+- **Token visibility.** git-seed gives the token to git in a
+  `git -c credential...helper=...` argument. For a short time, other users on the
+  same computer can see this argument in the process list. On a personal computer,
+  this is acceptable. On a shared computer, do not give git-seed a token: unset
+  `GITHUB_TOKEN`, and do not log in to `gh`. Without a token, git-seed cannot clone
+  private repos. Clone them yourself with SSH. git-seed then pulls them.
+- **One git process at a time.** `--status`, `--dirty` and `--recent` run git one
+  time for each repo, one repo after the other. This is fast enough for interactive
+  use, but it is slower with many repos. `--outdated` also connects to the network
+  one time for each repo. For this reason, it is a separate command and not a part
+  of `--status`.
+- **Tabs and newlines in paths.** A repo path that contains a tab or a newline makes
+  the tab-separated output incorrect. git-seed does not escape these characters.
+- **Spaces in labels.** Whitespace separates the fields of an entry, so a label
+  cannot contain a space, for example `my stuff`. `--scout` does not add such
+  directories. It shows a warning.
 
 ## Development
 
 ```bash
-bats tests/          # run the test suite
-shellcheck git-seed  # lint
+bats tests/          # run the tests
+shellcheck git-seed  # examine the script for problems
 ```
 
-Both run in CI on push and pull request.
+CI runs both on each push and each pull request.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

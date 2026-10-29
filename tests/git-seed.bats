@@ -112,13 +112,13 @@ teardown() {
 @test "--conf with missing file exits 1" {
     run "$SEED" --conf /no/such/file --status
     [ "$status" -eq 1 ]
-    [[ "$output" == *"not found"* ]]
+    [[ "$output" == *"Cannot find the config file"* ]]
 }
 
 @test "--conf requires an argument" {
     run "$SEED" --conf --status
     [ "$status" -eq 1 ]
-    [[ "$output" == *"requires a file argument"* ]]
+    [[ "$output" == *"--conf needs a file"* ]]
 }
 
 # ── conf entry sanitisation ───────────────────────────────────────────
@@ -187,19 +187,19 @@ teardown() {
     echo "work  testorg/alpha" >> "$CONF"
     run "$SEED" --conf "$CONF" --where alpha
     [ "$status" -eq 1 ]
-    [[ "$output" == *"several repos"*"personal/alpha"*"work/alpha"* ]]
+    [[ "$output" == *"matches more than one repo"*"personal/alpha"*"work/alpha"* ]]
 }
 
 @test "--where exits 1 for unknown repo" {
     run "$SEED" --conf "$CONF" --where nobody/nosuchrepo
     [ "$status" -eq 1 ]
-    [[ "$output" == *"No manifest entry"* ]]
+    [[ "$output" == *"No entry in the config file matches"* ]]
 }
 
 @test "--where requires an argument" {
     run "$SEED" --conf "$CONF" --where
     [ "$status" -eq 1 ]
-    [[ "$output" == *"requires a repo argument"* ]]
+    [[ "$output" == *"--where needs a repo name"* ]]
 }
 
 # ── --dirty ───────────────────────────────────────────────────────────
@@ -328,7 +328,7 @@ EOF
     echo "personal  pdbeard/ghost" >> "$CONF"
     run "$SEED" --conf "$CONF" --sync --dry-run
     [ "$status" -eq 0 ]
-    [[ "$output" == *"[DRY]"*"would clone pdbeard/ghost"* ]]
+    [[ "$output" == *"[DRY]   clone pdbeard/ghost"* ]]
     [ ! -e "$REPO_BASE/personal/ghost" ]
 }
 
@@ -396,7 +396,7 @@ EOF
         "$(git -C "$REPO_BASE/personal/alpha" rev-parse HEAD)"
     run "$SEED" --conf "$CONF" --pull-only --dry-run
     [[ "$output" == *"[SKIP]"*"alpha"*"detached HEAD"* ]]
-    [[ "$output" != *"would pull pdbeard/alpha"* ]]
+    [[ "$output" != *"[DRY]   pull pdbeard/alpha"* ]]
 }
 
 @test "--sync refuses a non-fast-forward pull and exits 1" {
@@ -419,7 +419,7 @@ EOF
     git -C "$REPO_BASE/personal/alpha" remote set-url origin "file:///nonexistent"
     run "$SEED" --conf "$CONF" --pull-only
     [ "$status" -eq 1 ]
-    [[ "$output" == *"[WARN]"*"failed to sync"* ]]
+    [[ "$output" == *"[WARN]"*"did not sync"* ]]
 }
 
 # ── --scout ───────────────────────────────────────────────────────────
@@ -439,7 +439,7 @@ EOF
     echo "personal  pdbeard/untracked" >> "$CONF"
     run "$SEED" --conf "$CONF" --scout
     [ "$status" -eq 0 ]
-    [[ "$output" == *"All repos are already tracked"* ]]
+    [[ "$output" == *"All repos are already in the config file"* ]]
 }
 
 @test "--scout cancel adds nothing to conf" {
@@ -496,15 +496,15 @@ EOF
     run "$SEED" --conf "$CONF" --scout
     grep -q "^personal  pdbeard/site.github.io$" "$CONF"
     run "$SEED" --conf "$CONF" --status
-    [[ "$output" != *"malformed"* ]]
+    [[ "$output" != *"Incorrect entry"* ]]
     [[ "$output" == *"[OK]"*"pdbeard/site.github.io"* ]]
 }
 
-@test "--scout skips a clone whose folder name differs from the repo name" {
+@test "--scout skips a clone whose directory name is not the repo name" {
     rm -rf "$REPO_BASE/personal/untracked"
     _make_repo "$REPO_BASE/personal/old-name" "https://github.com/pdbeard/realname.git"
     run "$SEED" --conf "$CONF" --scout
-    [[ "$output" == *"folder name differs"* ]]
+    [[ "$output" == *"directory name is not the repo name"* ]]
     ! grep -q "realname" "$CONF"
 }
 
@@ -522,7 +522,7 @@ EOF
     # Only the sandbox bin is on PATH: GitHub's runners ship gh in /usr/bin.
     run env PATH="$SANDBOX/bin" "$SEED" --conf "$CONF" --list
     [ "$status" -eq 1 ]
-    [[ "$output" == *"'gh' CLI required"* ]]
+    [[ "$output" == *"--list needs the gh CLI"* ]]
 }
 
 @test "--list --dir uses custom directory label in output" {
@@ -556,7 +556,7 @@ EOF
     echo "extra  pdbeard/gamma  # annotated" >> "$CONF"
     run "$SEED" --conf "$CONF" --sync --dry-run
     [ "$status" -eq 0 ]
-    [[ "$output" == *"would clone pdbeard/gamma"* ]]
+    [[ "$output" == *"[DRY]   clone pdbeard/gamma"* ]]
     [[ "$output" != *"annotated"* ]]
 }
 
@@ -588,14 +588,14 @@ EOF
 @test "extra fields in an entry produce a warning" {
     echo "extra  pdbeard/gamma  stray" >> "$CONF"
     run "$SEED" --conf "$CONF" --status
-    [[ "$output" == *"Ignoring extra fields"* ]]
+    [[ "$output" == *"ignores the extra fields"* ]]
 }
 
 @test "--scout does not re-offer a repo whose conf entry has an inline comment" {
     echo "personal  pdbeard/untracked  # already tracked" >> "$CONF"
     run "$SEED" --conf "$CONF" --scout
     [ "$status" -eq 0 ]
-    [[ "$output" == *"All repos are already tracked"* ]]
+    [[ "$output" == *"All repos are already in the config file"* ]]
 }
 
 # ── Argument validation ───────────────────────────────────────────────
@@ -603,13 +603,13 @@ EOF
 @test "--base requires an argument" {
     run "$SEED" --base
     [ "$status" -eq 1 ]
-    [[ "$output" == *"--base requires a directory argument"* ]]
+    [[ "$output" == *"--base needs a directory"* ]]
 }
 
 @test "conflicting commands exit 1" {
     run "$SEED" --conf "$CONF" --sync --status
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Conflicting commands"* ]]
+    [[ "$output" == *"Use only one command"* ]]
 }
 
 @test "repeating the same command is not a conflict" {
@@ -620,19 +620,19 @@ EOF
 @test "--mine outside --recent exits 1" {
     run "$SEED" --conf "$CONF" --status --mine
     [ "$status" -eq 1 ]
-    [[ "$output" == *"--mine only applies to --recent"* ]]
+    [[ "$output" == *"Use --mine only with --recent"* ]]
 }
 
 @test "--dir outside --list exits 1" {
     run "$SEED" --conf "$CONF" --status --dir work
     [ "$status" -eq 1 ]
-    [[ "$output" == *"--dir only applies to --list"* ]]
+    [[ "$output" == *"Use --dir only with --list"* ]]
 }
 
 @test "--dry-run outside the sync family exits 1" {
     run "$SEED" --conf "$CONF" --status --dry-run
     [ "$status" -eq 1 ]
-    [[ "$output" == *"--dry-run only applies"* ]]
+    [[ "$output" == *"Use --dry-run only with"* ]]
 }
 
 @test "--version prints a version string" {
@@ -685,7 +685,7 @@ _make_upstream_repo() {
     echo hello > "$REPO_BASE/work/notrepo/file.txt"
     echo "work  x/notrepo" >> "$CONF"
     run "$SEED" --conf "$CONF" --sync
-    [[ "$output" == *"path exists but is not a git repo"* ]]
+    [[ "$output" == *"is not a git repo. git-seed does not change it."* ]]
     # The user's file must survive untouched.
     [ -f "$REPO_BASE/work/notrepo/file.txt" ]
 }
@@ -748,7 +748,7 @@ EOF
     run "$SEED" --conf "$CONF" --outdated
     [ "$status" -eq 0 ]
     [[ "$output" != *"$REPO_BASE/personal/up2date"* ]]
-    [[ "$output" == *"needing pull: 0"* ]]
+    [[ "$output" == *"behind: 0"* ]]
 }
 
 @test "--outdated lists a repo whose remote has new commits" {
@@ -763,7 +763,7 @@ personal  x/behind
 EOF
     run "$SEED" --conf "$CONF" --outdated
     [[ "$output" == *"$REPO_BASE/personal/behind"* ]]
-    [[ "$output" == *"needing pull: 1"* ]]
+    [[ "$output" == *"behind: 1"* ]]
 }
 
 @test "--outdated does not update remote-tracking refs" {
@@ -794,8 +794,8 @@ EOF
         "$REPO_BASE" "$SANDBOX" > "$CONF"
     run "$SEED" --conf "$CONF" --sync --dry-run
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Bad section header"*"[Path"* ]]
-    [[ "$output" != *"would"* ]]
+    [[ "$output" == *"Incorrect section header"*"[Path"* ]]
+    [[ "$output" != *"[DRY]"* ]]
 }
 
 @test "a relative [path] is an error" {
@@ -815,7 +815,7 @@ EOF
 @test "--outdated exits 1 when the conf is missing" {
     run "$SEED" --conf "$SANDBOX/nope.conf" --outdated
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Config file not found"* ]]
+    [[ "$output" == *"Cannot find the config file"* ]]
     [[ "$output" != *"checked:"* ]]
 }
 
@@ -841,7 +841,7 @@ EOF
 @test "--scout treats an entry disabled with ## as known" {
     echo "## personal  pdbeard/untracked" >> "$CONF"
     run "$SEED" --conf "$CONF" --scout
-    [[ "$output" == *"All repos are already tracked"* ]]
+    [[ "$output" == *"All repos are already in the config file"* ]]
 }
 
 @test "--scout shortens a header to ~ only at a path boundary" {
@@ -883,7 +883,7 @@ WRAP
     printf '[path %s]\npersonal  pdbeard/alpha\n' "$REPO_BASE" > "$CONF"
     run "$SEED" --conf "$CONF" --outdated
     [ "$status" -eq 0 ]
-    [[ "$output" != *"could not reach"* ]]
+    [[ "$output" != *"cannot connect"* ]]
     [[ "$output" == *"no upstream: 1"* ]]
 }
 
@@ -891,7 +891,7 @@ WRAP
     printf '[path %s]\npersonal  pdbeard/alpha\n  [path %s/b]\nwork  testorg/beta\n' \
         "$REPO_BASE" "$SANDBOX" > "$CONF"
     run "$SEED" --conf "$CONF" --sync --dry-run
-    [[ "$output" == *"would clone testorg/beta → $SANDBOX/b/work/beta"* ]]
+    [[ "$output" == *"[DRY]   clone testorg/beta → $SANDBOX/b/work/beta"* ]]
 }
 
 @test "--scout skips a folder whose label contains '#'" {

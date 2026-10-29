@@ -1,14 +1,14 @@
-# git-seed repos config
-# Copy to ~/.config/git-seed/repos.conf and customise.
+# git-seed config file
+# Copy this file to ~/.config/git-seed/repos.conf, then edit it.
 #
 # Format:
-#   [path ~/some/dir]   — set base directory for entries below
-#   <subdir>  <owner/repo>
+#   [path ~/some/dir]       sets the base directory for the entries below it
+#   <label>  <owner/repo>   an entry: clones to <base directory>/<label>/<repo>
 #
-# - Subdirectory is relative to the [path] above it
-# - Entries above any [path] section fall back to --base (default: ~/git-seed-repos)
-# - Comment out lines with # to skip without deleting them
-# - Multiple [path] sections are supported
+# - A base directory must be an absolute path, or start with ~/
+# - Entries above all [path] sections use --base (default: ~/git-seed-repos)
+# - To disable an entry but keep it, put # at the start of its line
+# - You can use more than one [path] section
 
 [path ~/projects]
 personal  youruser/repo-name

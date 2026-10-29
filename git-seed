@@ -6,8 +6,8 @@ VERSION="1.0.0"
 # Associative arrays and 'local -n' namerefs need bash 4.3+. macOS ships
 # bash 3.2 as /bin/bash, where those fail with unrelated-looking errors.
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
-    echo "[ERROR] git-seed requires bash 4.3+ (found ${BASH_VERSION})" >&2
-    echo "        On macOS: brew install bash" >&2
+    echo "[ERROR] git-seed needs bash 4.3 or later. This bash is ${BASH_VERSION}." >&2
+    echo "        On macOS, install a newer bash with: brew install bash" >&2
     exit 1
 fi
 
@@ -79,7 +79,7 @@ tilde() {
 # A relative base would resolve against wherever the command is run from.
 require_absolute() {
     [[ "$1" == /* ]] && return 0
-    echo "[ERROR] $2 must be an absolute path, got: $1" >&2
+    echo "[ERROR] $2 must be an absolute path: $1" >&2
     exit 1
 }
 
@@ -99,7 +99,7 @@ conf_header() {
         require_absolute "$HEADER_PATH" "[path] in $CONF"
         return 0
     fi
-    echo "[ERROR] Bad section header in $CONF: $1 (expected [path DIR])" >&2
+    echo "[ERROR] Incorrect section header in $CONF: $1. Use [path DIR]." >&2
     exit 1
 }
 
@@ -128,11 +128,11 @@ parse_conf() {
         [[ -z "$dir" || -z "$repo" ]] && continue
 
         if [[ -n "$extra" ]]; then
-            echo "[WARN]  Ignoring extra fields after '$repo' in: $line" >&2
+            echo "[WARN]  git-seed ignores the extra fields after '$repo' in: $line" >&2
         fi
 
         if [[ "$repo" != */* ]]; then
-            echo "[WARN]  Skipping malformed entry: $line" >&2
+            echo "[WARN]  Incorrect entry, not used. Use <label> <owner/repo>: $line" >&2
             continue
         fi
 
@@ -178,30 +178,30 @@ do_sync() {
         # Never clone into or over an occupied path that is not a clone;
         # whatever is there belongs to the user.
         if ! is_git_repo "$dest"; then
-            echo "[ERROR] $repo: path exists but is not a git repo: $dest"
+            echo "[ERROR] $repo: $dest is not a git repo. git-seed does not change it."
             SYNC_ERRORS=$((SYNC_ERRORS + 1))
             return 1
         fi
         if [[ "$CLONE_ONLY" == true ]]; then
-            echo "[SKIP]  $repo (already exists)"
+            echo "[SKIP]  $repo (already cloned)"
             return
         fi
         if ! git -C "$dest" symbolic-ref HEAD &>/dev/null; then
-            echo "[SKIP]  $repo (detached HEAD — checkout a branch to pull)"
+            echo "[SKIP]  $repo (detached HEAD. To pull, switch to a branch.)"
             return
         fi
         if ! git -C "$dest" rev-parse --abbrev-ref '@{upstream}' &>/dev/null; then
-            echo "[SKIP]  $repo (no upstream — nothing to pull from)"
+            echo "[SKIP]  $repo (no upstream branch, so there is nothing to pull)"
             return
         fi
         if [[ "$DRY_RUN" == true ]]; then
-            echo "[DRY]   would pull $repo"
+            echo "[DRY]   pull $repo"
         else
             echo "[PULL]  $repo"
             # Fast-forward only: a diverged branch fails cleanly instead of
             # being left mid-merge partway through a bulk sync.
             git -C "$dest" ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} pull --ff-only || {
-                echo "[ERROR] Failed to pull $repo"
+                echo "[ERROR] Cannot pull $repo"
                 SYNC_ERRORS=$((SYNC_ERRORS + 1))
                 return 1
             }
@@ -215,14 +215,14 @@ do_sync() {
     fi
 
     if [[ "$DRY_RUN" == true ]]; then
-        echo "[DRY]   would clone $repo → $dest"
+        echo "[DRY]   clone $repo → $dest"
         return
     fi
 
     mkdir -p "$base_dir/$dir"
     echo "[CLONE] $repo → $dest"
     git ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} clone "https://github.com/${repo}.git" "$dest" || {
-        echo "[ERROR] Failed to clone $repo"
+        echo "[ERROR] Cannot clone $repo"
         SYNC_ERRORS=$((SYNC_ERRORS + 1))
         return 1
     }
@@ -235,7 +235,7 @@ run_sync() {
     parse_conf do_sync
     echo ""
     if [[ "$SYNC_ERRORS" -gt 0 ]]; then
-        echo "[WARN]  $SYNC_ERRORS repo(s) failed to sync"
+        echo "[WARN]  $SYNC_ERRORS repo(s) did not sync. Read the errors above."
     fi
     if [[ "$DRY_RUN" == false ]]; then
         echo "[HINT] Try: git-seed --browse"
@@ -399,7 +399,7 @@ pick_select() {
     local lines
     lines="$(cat)"
     if [[ -z "$lines" ]]; then
-        echo "[ERROR] No tracked, cloned repos in manifest." >&2
+        echo "[ERROR] No listed repo has a clone." >&2
         return 1
     fi
 
@@ -461,7 +461,7 @@ EOF
 
 browse_repos() {
     if ! command -v fzf &>/dev/null; then
-        echo "[WARN]  fzf not found; --browse degrades to a numbered list" >&2
+        echo "[WARN]  fzf is not installed. --browse shows a numbered list." >&2
     fi
     emit_existing | pick_select "$(browse_preview_cmd)"
 }
@@ -489,11 +489,11 @@ where_repo() {
         return 0
     fi
     if (( ${#by_name[@]} > 1 )); then
-        echo "[ERROR] '$target' matches several repos; use owner/repo:" >&2
+        echo "[ERROR] '$target' matches more than one repo. Use owner/repo:" >&2
         printf "  %s\n" "${by_name[@]}" >&2
         return 1
     fi
-    echo "[ERROR] No manifest entry matches: $target" >&2
+    echo "[ERROR] No entry in the config file matches: $target" >&2
     return 1
 }
 
@@ -505,7 +505,7 @@ recent_repos() {
         author_filter="$(git config --global user.email 2>/dev/null \
             || git config user.email 2>/dev/null || true)"
         if [[ -z "$author_filter" ]]; then
-            echo "[ERROR] --mine requires git user.email to be configured" >&2
+            echo "[ERROR] --mine needs git user.email. Set it with: git config --global user.email <email>" >&2
             return 1
         fi
     fi
@@ -542,7 +542,7 @@ open_repo() {
         done
     fi
     if [[ -z "$editor" ]]; then
-        echo "[ERROR] No editor found (\$EDITOR unset, code/vim not on PATH)" >&2
+        echo "[ERROR] No editor found. Set \$EDITOR, or put code or vim on your PATH." >&2
         exit 1
     fi
 
@@ -595,7 +595,7 @@ outdated_repos() {
             "$merge:refs/remotes/$remote/${merge#refs/heads/}" 2>&1)" || status=$?
 
         if (( status != 0 )); then
-            echo "[ERROR] $repo: could not reach $remote" >&2
+            echo "[ERROR] $repo: cannot connect to $remote" >&2
             failed=$((failed + 1))
             continue
         fi
@@ -607,9 +607,9 @@ outdated_repos() {
     done < <(emit_existing)
 
     echo "" >&2
-    printf "  checked: %d  needing pull: %d" "$checked" "$behind" >&2
+    printf "  checked: %d  behind: %d" "$checked" "$behind" >&2
     if (( skipped > 0 )); then printf "  no upstream: %d" "$skipped" >&2; fi
-    if (( failed > 0 )); then printf "  unreachable: %d" "$failed" >&2; fi
+    if (( failed > 0 )); then printf "  cannot connect: %d" "$failed" >&2; fi
     printf "\n" >&2
     if (( behind > 0 )); then
         echo "[HINT] Try: git-seed --outdated | xargs -I{} git -C {} pull --ff-only" >&2
@@ -668,7 +668,7 @@ scout_insert_entry() {
     fi
 
     if ! mv "$tmp" "$target"; then
-        echo "[ERROR] Could not write $target; updated copy kept at $tmp" >&2
+        echo "[ERROR] Cannot write $target. The changed copy is at $tmp." >&2
         return 1
     fi
 }
@@ -698,7 +698,7 @@ scout_collect_candidates() {
     local search_dir
     while IFS= read -r search_dir; do
         [[ ! -d "$search_dir" ]] && continue
-        printf "[INFO] Scanning %s...\n" "$(tilde "$search_dir")" >&2
+        printf "[INFO] Search: %s\n" "$(tilde "$search_dir")" >&2
 
         while IFS= read -r gitdir; do
             local repo_path="${gitdir%/.git}"
@@ -713,7 +713,7 @@ scout_collect_candidates() {
             # Conf fields are whitespace-separated and '#' starts a comment,
             # so a label containing either cannot be written as an entry.
             if [[ "$dir" =~ [[:space:]#] ]]; then
-                echo "[WARN]  Skipping $(tilde "$repo_path"): folder '$dir' contains whitespace or '#'" >&2
+                echo "[WARN]  Not added: $(tilde "$repo_path"). Its label '$dir' contains whitespace or '#'." >&2
                 continue
             fi
 
@@ -724,7 +724,7 @@ scout_collect_candidates() {
             if [[ "$remote" =~ github\.com[:/]([^/]+/[^/]+)$ ]]; then
                 owner_repo="${BASH_REMATCH[1]%.git}"
             else
-                echo "[WARN]  Skipping $(tilde "$repo_path"): origin is not a GitHub repo" >&2
+                echo "[WARN]  Not added: $(tilde "$repo_path"). Its origin is not a GitHub repo." >&2
                 continue
             fi
 
@@ -733,7 +733,7 @@ scout_collect_candidates() {
             # An entry resolves to <dir>/<repo name>. A clone in a folder with
             # another name would read as MISSING, and --sync would clone it again.
             if [[ "$folder_name" != "${owner_repo##*/}" ]]; then
-                echo "[WARN]  Skipping $(tilde "$repo_path"): folder name differs from repo name '${owner_repo##*/}'" >&2
+                echo "[WARN]  Not added: $(tilde "$repo_path"). Its directory name is not the repo name '${owner_repo##*/}'." >&2
                 continue
             fi
 
@@ -750,7 +750,7 @@ scout_repos() {
     candidates="$(scout_collect_candidates)"
 
     if [[ -z "$candidates" ]]; then
-        echo "[OK] All repos are already tracked in repos.conf."
+        echo "[OK] All repos are already in the config file."
         return 0
     fi
 
@@ -769,15 +769,15 @@ scout_repos() {
             echo "[ADDED] $dir  $owner_repo"
             added=$((added + 1))
         else
-            echo "[ERROR] Failed to add $owner_repo" >&2
+            echo "[ERROR] Cannot add $owner_repo" >&2
         fi
     done <<< "$selected"
 
     echo ""
     if [[ "$added" -eq 0 ]]; then
-        echo "[OK] $total untracked repo(s) found, none added."
+        echo "[OK] Found $total unlisted repo(s). Added none."
     else
-        echo "[DONE] Added $added of $total untracked repo(s) to repos.conf."
+        echo "[DONE] Added $added of $total unlisted repo(s) to the config file."
         echo "[HINT] Try: git-seed --browse"
     fi
 }
@@ -786,7 +786,7 @@ scout_repos() {
 # anything meant for the user goes to stderr.
 scout_pick_fzf() {
     local candidates="$1" total="$2"
-    echo "[INFO] Found $total untracked repo(s). TAB to multi-select, ENTER to add." >&2
+    echo "[INFO] Found $total unlisted repo(s). Use TAB to select one or more, then ENTER to add." >&2
 
     # Single quotes are deliberate: {1}..{5} are substituted by fzf, and the
     # shell variables below must be expanded by the preview subshell, not here.
@@ -816,7 +816,7 @@ fi
     printf "%s\n" "$candidates" \
         | fzf --multi --delimiter=$'\t' --with-nth=1,2 \
               --preview "$preview" --preview-window='right,60%,wrap' \
-              --header='TAB: select  ENTER: add selected to repos.conf' || true
+              --header='TAB: select  ENTER: add to the config file' || true
 }
 
 scout_pick_prompt() {
@@ -828,7 +828,7 @@ scout_pick_prompt() {
             echo "  Found:  $owner_repo"
             echo "  Path:   $repo_path"
             [[ -n "$remote" ]] && echo "  Remote: $remote"
-            printf "  Add to repos.conf under '%s'? [y/N] " "$dir"
+            printf "  Add to the config file with label '%s'? [y/N] " "$dir"
         } >&2
         read -r answer </dev/tty
         if [[ "$answer" =~ ^[Yy]$ ]]; then printf "%s\n" "$row"; fi
@@ -838,7 +838,7 @@ scout_pick_prompt() {
 # ── List repos via gh ─────────────────────────────────────────────
 list_repos() {
     if ! command -v gh &>/dev/null; then
-        echo "[ERROR] 'gh' CLI required for --list. Run: gh auth login" >&2
+        echo "[ERROR] --list needs the gh CLI. Install gh, then run: gh auth login" >&2
         exit 1
     fi
     local limit=1000 repos
@@ -846,7 +846,7 @@ list_repos() {
     echo "# Paste into repos.conf:"
     [[ -n "$repos" ]] && awk -v dir="$LIST_DIR" '{ print dir "  " $0 }' <<< "$repos"
     if (( $(wc -l <<< "$repos") >= limit )); then
-        echo "[WARN]  Stopped at $limit repos; some may be missing from this list" >&2
+        echo "[WARN]  This list stops at $limit repos. It can be incomplete." >&2
     fi
 }
 
@@ -855,59 +855,58 @@ usage() {
     cat <<EOF
 Usage: git-seed <command> [options]
 
-Manifest commands:
-  --sync           Clone missing repos and pull existing ones (fast-forward
-                   only). Exits 1 if any repo failed.
-  --clone-only     Clone missing repos, skip existing
-  --pull-only      Pull existing repos, skip missing
-  --scout          Scan paths defined in conf for untracked git repos and
-                   interactively offer to add them (multi-select fzf if present)
-  --status         Show cloned/missing/dirty state for all repos in conf
-  --list           List your GitHub repos via gh CLI (requires gh auth login)
-                   Outputs lines ready to paste into repos.conf
+Config commands:
+  --sync           Clone missing repos and pull cloned repos (fast-forward
+                   only). Exit with status 1 if a repo does not sync.
+  --clone-only     Clone missing repos. Do not pull cloned repos.
+  --pull-only      Pull cloned repos. Do not clone missing repos.
+  --scout          Find repos in the base directories that are not in the
+                   config file, and ask which to add. Use fzf if installed.
+  --status         Show the state of each repo in the config file.
+  --list           List your GitHub repos with the gh CLI. Each output line
+                   is ready to paste into the config file.
 
-Frontend commands:
-  --browse         fzf picker with preview (commits, status, README).
-                   Prints selected path on stdout.
-  --where <repo>   Look up the local path for owner/repo (or basename).
-                   Prints path on stdout.
-  --recent [N]     List N most-recently-committed tracked repos (default 20).
-                   One path per line.
-  --mine           Modifier for --recent: only count commits by your
-                   git user.email (shows repos you actively work in).
-  --dirty          List tracked repos with uncommitted changes.
-  --outdated       Check each remote for commits you have not pulled.
-                   Requires network access. Prints one path per repo
-                   that needs a pull; summary goes to stderr.
-  --open [editor]  Run --browse, then open the selection in editor.
-                   Editor defaults: \$EDITOR, then code, then vim.
+Path commands:
+  --browse         Select a repo in fzf, with a preview. Print its path.
+  --where <repo>   Print the path of a repo. Give owner/repo, or only the
+                   repo name if no other listed repo has that name.
+  --recent [N]     Print the paths of the N repos with the newest commits
+                   (default 20).
+  --mine           Use with --recent: count only commits by your git
+                   user.email.
+  --dirty          Print the paths of repos with uncommitted changes.
+  --outdated       Print the paths of repos whose remote has commits that you
+                   did not pull. Connect to each remote. Print a summary
+                   on stderr.
+  --open [editor]  Select a repo as --browse does, then open it in the
+                   editor. Default: \$EDITOR, then code, then vim.
 
 Options:
-  --dry-run        Print what would happen without making any changes
-                   (works with --sync, --clone-only, --pull-only)
-  --dir <label>    Directory label for --list output (default: projects)
-  --conf FILE      Use a specific config file
-  --base DIR       Fallback base dir for entries with no [path] section
-                   (default: ~/git-seed-repos)
-  --version        Print the version and exit
-  --help           Show this message
+  --dry-run        Show the changes, but do not make them. Use with --sync,
+                   --clone-only or --pull-only.
+  --dir <label>    Label for the --list output (default: projects).
+  --conf FILE      Use this config file.
+  --base DIR       Base directory for entries above all [path] sections
+                   (default: ~/git-seed-repos).
+  --version        Print the version.
+  --help           Show this help.
 
-Options only apply to the commands noted above; using one elsewhere is an
-error rather than a silent no-op.
+Some options work only with the commands that they name, for example
+--dry-run. With a different command, git-seed stops with an error.
 
-Composition examples:
+Examples:
   cd "\$(git-seed --browse)"
   \$EDITOR "\$(git-seed --where pdbeard/intermcli)"
   git-seed --dirty | xargs -I{} git -C {} status -s
   git-seed --recent 5
 
-Config file lookup order:
+Config file locations, in this order:
   1. --conf FILE
   2. \$CONF_FILE
   3. ~/.config/git-seed/repos.conf  (or \$XDG_CONFIG_HOME/git-seed/repos.conf)
-  4. <script dir>/repos.conf
+  4. <script directory>/repos.conf
 
-Config format (repos.conf):
+Config file format (repos.conf):
   [path ~/projects]
   personal      youruser/your-repo
   work          yourorg/their-repo
@@ -929,7 +928,7 @@ DIR_SET=false
 # Reject a second command rather than silently honouring the last one.
 set_command() {
     if [[ -n "$COMMAND" && "$COMMAND" != "$1" ]]; then
-        echo "[ERROR] Conflicting commands: --$COMMAND and --$1" >&2
+        echo "[ERROR] Use only one command. You used --$COMMAND and --$1." >&2
         exit 1
     fi
     COMMAND="$1"
@@ -944,13 +943,13 @@ while [[ $# -gt 0 ]]; do
         --status)      set_command status ;;
         --list)        set_command list ;;
         --browse)      set_command browse ;;
-        --where)       [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --where requires a repo argument" >&2; exit 1; }
+        --where)       [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --where needs a repo name" >&2; exit 1; }
                        set_command where; WHERE_REPO="$2"; shift ;;
         --where=*)     set_command where; WHERE_REPO="${1#--where=}"
-                       [[ -z "$WHERE_REPO" ]] && { echo "[ERROR] --where requires a repo argument" >&2; exit 1; } ;;
+                       [[ -z "$WHERE_REPO" ]] && { echo "[ERROR] --where needs a repo name" >&2; exit 1; } ;;
         --recent)      set_command recent
                        if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
-                           [[ "$2" =~ ^[1-9][0-9]*$ ]] || { echo "[ERROR] --recent expects a positive integer, got: $2" >&2; exit 1; }
+                           [[ "$2" =~ ^[1-9][0-9]*$ ]] || { echo "[ERROR] --recent needs a positive integer: $2" >&2; exit 1; }
                            RECENT_N="$2"; shift
                        fi ;;
         --mine)        RECENT_MINE=true ;;
@@ -961,15 +960,15 @@ while [[ $# -gt 0 ]]; do
                            OPEN_EDITOR="$2"; shift
                        fi ;;
         --dry-run)     DRY_RUN=true ;;
-        --dir)         [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --dir requires a label argument" >&2; exit 1; }
+        --dir)         [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --dir needs a label" >&2; exit 1; }
                        LIST_DIR="$2"; DIR_SET=true; shift ;;
-        --dir=*)       LIST_DIR="${1#--dir=}"; DIR_SET=true; [[ -z "$LIST_DIR" ]] && { echo "[ERROR] --dir requires a label argument" >&2; exit 1; } ;;
-        --conf)        [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --conf requires a file argument" >&2; exit 1; }
+        --dir=*)       LIST_DIR="${1#--dir=}"; DIR_SET=true; [[ -z "$LIST_DIR" ]] && { echo "[ERROR] --dir needs a label" >&2; exit 1; } ;;
+        --conf)        [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --conf needs a file" >&2; exit 1; }
                        CONF="$2"; shift ;;
-        --conf=*)      CONF="${1#--conf=}"; [[ -z "$CONF" ]] && { echo "[ERROR] --conf requires a file argument" >&2; exit 1; } ;;
-        --base)        [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --base requires a directory argument" >&2; exit 1; }
+        --conf=*)      CONF="${1#--conf=}"; [[ -z "$CONF" ]] && { echo "[ERROR] --conf needs a file" >&2; exit 1; } ;;
+        --base)        [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "[ERROR] --base needs a directory" >&2; exit 1; }
                        BASE_DIR="$2"; shift ;;
-        --base=*)      BASE_DIR="${1#--base=}"; [[ -z "$BASE_DIR" ]] && { echo "[ERROR] --base requires a directory argument" >&2; exit 1; } ;;
+        --base=*)      BASE_DIR="${1#--base=}"; [[ -z "$BASE_DIR" ]] && { echo "[ERROR] --base needs a directory" >&2; exit 1; } ;;
         --version)     echo "git-seed $VERSION"; exit 0 ;;
         --help)        usage; exit 0 ;;
         *)             echo "[ERROR] Unknown option: $1" >&2; usage; exit 1 ;;
@@ -981,17 +980,17 @@ done
 
 # Reject flags that would otherwise be accepted and silently ignored.
 if [[ "$RECENT_MINE" == true && "$COMMAND" != "recent" ]]; then
-    echo "[ERROR] --mine only applies to --recent" >&2
+    echo "[ERROR] Use --mine only with --recent" >&2
     exit 1
 fi
 if [[ "$DIR_SET" == true && "$COMMAND" != "list" ]]; then
-    echo "[ERROR] --dir only applies to --list" >&2
+    echo "[ERROR] Use --dir only with --list" >&2
     exit 1
 fi
 if [[ "$DRY_RUN" == true ]]; then
     case "$COMMAND" in
         sync|clone-only|pull-only) ;;
-        *) echo "[ERROR] --dry-run only applies to --sync, --clone-only and --pull-only" >&2
+        *) echo "[ERROR] Use --dry-run only with --sync, --clone-only or --pull-only" >&2
            exit 1 ;;
     esac
 fi
@@ -1001,7 +1000,7 @@ fi
 # run without a conf, since it can create one.
 if [[ "$COMMAND" != list ]]; then
     if [[ "$COMMAND" != scout && ! -f "$CONF" ]]; then
-        echo "[ERROR] Config file not found: $CONF" >&2
+        echo "[ERROR] Cannot find the config file: $CONF" >&2
         exit 1
     fi
     declare -A CONF_PATHS

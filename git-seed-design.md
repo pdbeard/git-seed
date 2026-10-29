@@ -73,12 +73,12 @@ sibling flag; no `--format=<x>` machinery until a third format exists.
 
 ### 2. `--repo <name>` — single-repo targeting
 
-**Motivation.** Every command currently operates on the whole manifest. A UI needs to
+**Motivation.** Every command currently operates on all listed repos. A UI needs to
 trigger actions on individual repos — the user clicks "pull" on one row, not all of
 them.
 
 **Behaviour.** `--repo <name>` is a filter flag that narrows any command to a single
-manifest entry. `<name>` follows the same resolution as `--where`: exact `owner/repo`
+entry in the config file. `<name>` follows the same resolution as `--where`: exact `owner/repo`
 match first, basename fallback second.
 
 ```bash
@@ -89,14 +89,14 @@ git-seed --dirty  --repo pdbeard/alpha
 
 **Implementation note.** `parse_conf` already calls a per-entry callback; adding a
 filter at that level touches one place and works for all commands automatically.
-`emit_existing` should get the same filter so the frontend commands benefit too.
+`emit_existing` should get the same filter so the path commands benefit too.
 
-**Exit behaviour.** Exits non-zero if `<name>` matches no manifest entry, so callers
+**Exit behaviour.** Exits non-zero if `<name>` matches no entry, so callers
 can detect typos cleanly.
 
 ---
 
-### 3. `--add <owner/repo>` — direct manifest entry
+### 3. `--add <owner/repo>` — add an entry directly
 
 **Motivation.** `--scout` discovers repos interactively. A UI already knows which repo
 the user wants to add (they typed it or picked it from a search). It needs a
@@ -109,19 +109,19 @@ git-seed --add pdbeard/new-repo
 git-seed --add pdbeard/new-repo --dir work
 ```
 
-- `--dir` specifies the subdirectory label (e.g. `personal`, `work`). Defaults to the
-  first directory label found in the conf, or `projects` if none exist.
-- Inserts under the first `[path]` section in the conf, or appends a new one.
+- `--dir` specifies the label (for example `personal` or `work`). Defaults to the
+  first label in the config file, or `projects` if none exist.
+- Inserts under the first `[path]` section in the config file, or appends a new one.
 - Reuses the existing `scout_insert_entry` logic — no new insertion code needed.
 - Idempotent: silently succeeds if the entry already exists.
 - Does not clone. Run `--sync --repo <owner/repo>` after to clone.
 
 ---
 
-### 4. `--remove <owner/repo>` — untrack a repo
+### 4. `--remove <owner/repo>` — remove an entry
 
-**Motivation.** The complement of `--add`. A UI should be able to remove a repo from
-tracking without the user hand-editing the conf.
+**Motivation.** The complement of `--add`. A UI should be able to remove an entry
+without the user editing the config file by hand.
 
 **Behaviour.**
 
@@ -137,7 +137,7 @@ git-seed --remove pdbeard/old-repo --delete-local
 - Prints `[REMOVED] owner/repo` on success, `[WARN] local clone kept at <path>` unless
   `--delete-local` was passed.
 
-**Safety.** Before deleting the local clone, check for uncommitted changes (via
+**Safety.** Before deleting the local clone, check for uncommitted changes (with
 `git status --porcelain`). If dirty, abort with `[ERROR]` and require `--force` to
 override. Never silently delete a dirty working tree.
 
@@ -165,7 +165,7 @@ with its own interface and does not need to call them.
 
 **The problem.** `--status`, `--dirty`, and `--recent` shell out to git once per repo,
 sequentially. `--status` runs `git status --porcelain` for every cloned entry; on a
-cold cache with a large manifest this takes seconds.
+cold cache with many listed repos this takes seconds.
 
 This is fine for a command a person runs occasionally. It is not obviously fine for a
 widget polling `--status --tsv` on a timer, which is the motivation for the whole v2
@@ -173,11 +173,11 @@ surface. A poll that takes three seconds cannot run every second, and a poll tha
 spawns two git processes per repo per tick is a meaningful background load.
 
 **Measure before designing around it.** The cost is unknown at present — it has not
-been benchmarked against a realistic manifest. Time `--status` at the manifest size
+been measured with a realistic config file. Time `--status` with the number of repos
 you actually expect before choosing any of the following:
 
 - **Do nothing.** If a full poll is comfortably under the intended refresh interval,
-  there is no problem to solve. Most likely outcome for manifests of a few dozen repos.
+  there is no problem to solve. This is the most likely result for a few dozen repos.
 - **Parallelise.** `xargs -P` over the per-repo check. Cheap in effort, but reorders
   output, so `do_status` would need to collect and sort rather than print as it goes.
 - **Let the caller poll less.** Push the problem to the UI: poll on a long interval,
@@ -206,5 +206,5 @@ widget is built, since the answer could change what the widget asks for.
 2. `--repo` targeting — enables all per-repo UI actions; single change to
    `parse_conf` / `emit_existing`.
 3. `--add` — reuses existing `scout_insert_entry`; low effort.
-4. `--remove` — new logic, highest risk (manifest mutation + optional file deletion);
+4. `--remove` — new logic, highest risk (config file changes and optional file deletion);
    implement last.
