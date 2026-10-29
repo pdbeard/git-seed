@@ -470,13 +470,24 @@ EOF
     grep -q "^x  me/new$" "$CONF"
 }
 
-@test "--scout writes through a symlinked conf" {
+@test "--scout writes through a symlinked conf, keeping its permissions" {
     mv "$CONF" "$SANDBOX/real.conf"
-    ln -s "$SANDBOX/real.conf" "$CONF"
+    chmod 640 "$SANDBOX/real.conf"
+    ln -s real.conf "$CONF"   # relative, as dotfile managers often make them
     run "$SEED" --conf "$CONF" --scout
     [ "$status" -eq 0 ]
     [ -L "$CONF" ]
     grep -q "pdbeard/untracked" "$SANDBOX/real.conf"
+    [ "$(ls -l "$SANDBOX/real.conf" | cut -c1-10)" = "-rw-r-----" ]
+    # The temp file was renamed into place, not left behind.
+    [ -z "$(ls "$SANDBOX" | grep '^real\.conf\.')" ]
+}
+
+@test "[path ~user/x] is an error, not \$HOME + user/x" {
+    printf '[path ~bob/x]\nw  me/one\n' > "$CONF"
+    run "$SEED" --conf "$CONF" --status
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"must be an absolute path"*"~bob/x"* ]]
 }
 
 @test "--scout keeps dots in repo names" {
@@ -860,7 +871,9 @@ WRAP
         run "$SEED" --conf "$CONF" --clone-only
     [ "$status" -eq 0 ]
     [ -d "$REPO_BASE/personal/fresh/.git" ]
-    grep -q "credential.https://github.com.helper=" "$SANDBOX/git.log"
+    # The empty value first clears helpers like a keychain, so the token wins.
+    grep -q "credential.https://github.com.helper= -c credential.https://github.com.helper=!" \
+        "$SANDBOX/git.log"
     ! grep -q "credential.helper=" "$SANDBOX/git.log"
 }
 

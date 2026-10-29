@@ -39,7 +39,9 @@ SYNC_ERRORS=0
 # Call it directly, never in $(...), or the assignment is lost. Expand with
 # ${GIT_AUTH[@]+"${GIT_AUTH[@]}"}: bash 4.3 treats an empty array as unset.
 # The helper is scoped to github.com so the token is never offered to a
-# remote on another host.
+# remote on another host. The empty value first clears any helpers already
+# configured for github.com (e.g. a keychain), which would otherwise answer
+# first and could hand git stale credentials instead of the token.
 GIT_AUTH=()
 
 load_auth() {
@@ -48,7 +50,8 @@ load_auth() {
         token="$(gh auth token 2>/dev/null || true)"
     fi
     [[ -z "$token" ]] && return 0
-    GIT_AUTH=(-c "credential.https://github.com.helper=!f() { echo username=x-access-token; echo password=$token; }; f")
+    GIT_AUTH=(-c "credential.https://github.com.helper="
+              -c "credential.https://github.com.helper=!f() { echo username=x-access-token; echo password=$token; }; f")
 }
 
 # ── Parse conf ────────────────────────────────────────────────────
@@ -88,7 +91,11 @@ HEADER_PATH=""
 conf_header() {
     [[ "$1" == \[* ]] || return 1
     if [[ "$1" =~ ^\[path[[:space:]]+(.+)\]$ ]]; then
-        HEADER_PATH="${BASH_REMATCH[1]/#\~/$HOME}"
+        HEADER_PATH="${BASH_REMATCH[1]}"
+        # Only "~" and "~/..." mean $HOME. "~bob/x" stays as written and fails
+        # the absolute-path check, instead of becoming "$HOMEbob/x".
+        [[ "$HEADER_PATH" == \~ || "$HEADER_PATH" == \~/* ]] \
+            && HEADER_PATH="$HOME${HEADER_PATH#\~}"
         require_absolute "$HEADER_PATH" "[path] in $CONF"
         return 0
     fi
@@ -610,15 +617,25 @@ outdated_repos() {
 # Adds "$dir  $owner_repo" under the first [path] section that resolves to
 # $search_dir, or appends a fresh section if there is none. Headers are read
 # the way parse_conf reads them: comment and surrounding space stripped, '~'
-# expanded. The result is written back through the existing file, so a
-# symlinked conf stays a symlink and keeps its permissions.
+# expanded.
 scout_insert_entry() {
     local search_dir="$1" dir="$2" owner_repo="$3"
     local tmp
     if [[ ! -f "$CONF" ]]; then
         mkdir -p "$(dirname "$CONF")" && : > "$CONF" || return 1
     fi
-    tmp="$(mktemp)" || return 1
+    # Write a temp file beside the real file, following any symlink, then
+    # rename it over the original. A rename is atomic, so a kill mid-write
+    # never leaves a truncated conf, and replacing the target rather than
+    # the link keeps a symlinked conf a symlink. 'cp -p' carries the
+    # permissions over to the temp file.
+    local target="$CONF" link
+    while [[ -L "$target" ]]; do
+        link="$(readlink "$target")"
+        if [[ "$link" == /* ]]; then target="$link"; else target="$(dirname "$target")/$link"; fi
+    done
+    tmp="$(mktemp "$target.XXXXXX")" || return 1
+    cp -p "$target" "$tmp" || { rm -f "$tmp"; return 1; }
 
     if ! awk -v home="$HOME" -v want="$search_dir" -v entry="$dir  $owner_repo" \
              -v new_hdr="[path $(tilde "$search_dir")]" '
@@ -627,7 +644,8 @@ scout_insert_entry() {
             l = $0; sub(/#.*/, "", l); sub(/^[ \t]+/, "", l); sub(/[ \t]+$/, "", l)
         }
         l ~ /^\[path[ \t]+.+\]$/ {
-            p = l; sub(/^\[path[ \t]+/, "", p); sub(/\]$/, "", p); sub(/^~/, home, p)
+            p = l; sub(/^\[path[ \t]+/, "", p); sub(/\]$/, "", p)
+            if (p == "~" || p ~ /^~\//) p = home substr(p, 2)
             in_section = (p == want && !header_line)
             if (in_section) header_line = NR
             next
@@ -646,11 +664,10 @@ scout_insert_entry() {
         return 1
     fi
 
-    if ! cat "$tmp" > "$CONF"; then
-        echo "[ERROR] Could not write $CONF; updated copy kept at $tmp" >&2
+    if ! mv "$tmp" "$target"; then
+        echo "[ERROR] Could not write $target; updated copy kept at $tmp" >&2
         return 1
     fi
-    rm -f "$tmp"
 }
 
 # ── Scout: collect untracked candidates ───────────────────────────
@@ -838,7 +855,7 @@ Usage: git-seed <command> [options]
 Manifest commands:
   --sync           Clone missing repos and pull existing ones (fast-forward
                    only). Exits 1 if any repo failed.
-  --clone-only    Clone missing repos, skip existing
+  --clone-only     Clone missing repos, skip existing
   --pull-only      Pull existing repos, skip missing
   --scout          Scan paths defined in conf for untracked git repos and
                    interactively offer to add them (multi-select fzf if present)
