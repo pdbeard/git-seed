@@ -314,10 +314,10 @@ EOF
 }
 
 @test "--open exits 1 when no editor found and EDITOR unset" {
-    # /bin contains bash but not vim or code; /usr/bin/env can find bash via /bin.
-    # Stripping homebrew and /usr/bin ensures no vim or code fallback is found.
-    run env PATH="$SANDBOX/bin:/bin" HOME="$HOME" CONF="$CONF" \
-        "$SEED" --conf "$CONF" --open
+    # Only the sandbox bin (bash, dirname, mock fzf) is on PATH. Not even /bin:
+    # on merged-/usr systems like Ubuntu it is /usr/bin and holds vim, which
+    # git-seed would exec, hanging the run waiting for a terminal.
+    run env -u EDITOR PATH="$SANDBOX/bin" "$SEED" --conf "$CONF" --open
     [ "$status" -eq 1 ]
     [[ "$output" == *"No editor found"* ]]
 }
@@ -519,12 +519,10 @@ EOF
 # ── --list ────────────────────────────────────────────────────────────
 
 @test "--list exits 1 when gh is not on PATH" {
-    # Restrict PATH to basic Unix dirs + sandbox; gh lives in homebrew so it
-    # won't be found, exercising the "gh not installed" error branch.
-    run env PATH="$SANDBOX/bin:/usr/bin:/bin" HOME="$HOME" CONF="$CONF" \
-        "$SEED" --conf "$CONF" --list
+    # Only the sandbox bin is on PATH: GitHub's runners ship gh in /usr/bin.
+    run env PATH="$SANDBOX/bin" "$SEED" --conf "$CONF" --list
     [ "$status" -eq 1 ]
-    [[ "$output" == *"gh"* ]]
+    [[ "$output" == *"'gh' CLI required"* ]]
 }
 
 @test "--list --dir uses custom directory label in output" {
