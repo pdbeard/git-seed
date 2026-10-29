@@ -8,12 +8,10 @@ _make_repo() {
     local path="$1" remote="$2" msg="${3:-init}"
     mkdir -p "$path"
     git -C "$path" init -q
-    git -C "$path" -c user.email=test@test.com -c user.name=Test \
-        remote add origin "$remote"
+    git -C "$path" remote add origin "$remote"
     echo "# $(basename "$path")" > "$path/README.md"
     git -C "$path" add .
-    git -C "$path" -c user.email=test@test.com -c user.name=Test \
-        commit -qm "$msg"
+    git -C "$path" commit -qm "$msg"
 }
 
 # Gives a repo a local bare origin and makes its branch track it, so it has
@@ -31,6 +29,14 @@ setup() {
     SANDBOX=$(mktemp -d)
     REPO_BASE="$SANDBOX/repos"
     CONF="$SANDBOX/repos.conf"
+
+    # Tests must not depend on the developer's git config (identity, commit
+    # signing, default branch), so every git call gets a known one.
+    export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$SANDBOX/gitconfig"
+    git config --global user.email test@test.com
+    git config --global user.name Test
+    git config --global commit.gpgsign false
+    git config --global init.defaultBranch main
 
     # Repos in manifest
     _make_repo "$REPO_BASE/personal/alpha" "https://github.com/pdbeard/alpha.git"
@@ -243,22 +249,21 @@ teardown() {
 }
 
 @test "--recent --mine filters to repos with commits by git user.email" {
-    local email
-    email="$(git config --global user.email 2>/dev/null || true)"
-    [ -z "$email" ] && skip "git user.email not configured"
+    # alpha's newest commit is someone else's; beta's newest is ours.
+    GIT_COMMITTER_DATE="@4000000000 +0000" git -C "$REPO_BASE/personal/alpha" \
+        -c user.email=other@test.com commit -q --allow-empty -m theirs
+    GIT_COMMITTER_DATE="@3900000000 +0000" git -C "$REPO_BASE/work/beta" \
+        commit -q --allow-empty -m mine
 
-    # alpha has a commit by test@test.com; add a commit by the real user to beta
-    git -C "$REPO_BASE/work/beta" -c user.email="$email" -c user.name=Test \
-        commit -qm "mine" --allow-empty
-
-    run "$SEED" --conf "$CONF" --recent --mine
+    run "$SEED" --conf "$CONF" --recent 1
+    [[ "$output" == *"/alpha" ]]
+    run "$SEED" --conf "$CONF" --recent 1 --mine
     [ "$status" -eq 0 ]
-    # beta should appear (has a commit by current user); alpha may or may not
-    [[ "$output" == *"beta"* ]]
+    [[ "$output" == *"/beta" ]]
 }
 
 @test "--recent --mine exits 1 when git user.email is not configured" {
-    run env HOME="$SANDBOX" GIT_CONFIG_NOSYSTEM=1 \
+    run env GIT_CONFIG_GLOBAL=/dev/null \
         "$SEED" --conf "$CONF" --recent --mine
     [ "$status" -eq 1 ]
     [[ "$output" == *"user.email"* ]]
@@ -362,8 +367,7 @@ EOF
     local bare upstream="$SANDBOX/upstream-alpha"
     bare="$(_track_upstream "$REPO_BASE/personal/alpha")"
     git clone -q "file://$bare" "$upstream"
-    git -C "$upstream" -c user.email=test@test.com -c user.name=Test \
-        commit -qm "upstream change" --allow-empty
+    git -C "$upstream" commit -qm "upstream change" --allow-empty
     git -C "$upstream" push -q origin HEAD
 
     run "$SEED" --conf "$CONF" --pull-only
@@ -399,9 +403,9 @@ EOF
     local upstream
     upstream="$(_track_upstream "$REPO_BASE/personal/alpha")"
     git clone -q "$upstream" "$SANDBOX/other"
-    git -C "$SANDBOX/other" -c user.email=t@t -c user.name=T commit -q --allow-empty -m theirs
+    git -C "$SANDBOX/other" commit -q --allow-empty -m theirs
     git -C "$SANDBOX/other" push -q
-    git -C "$REPO_BASE/personal/alpha" -c user.email=t@t -c user.name=T commit -q --allow-empty -m mine
+    git -C "$REPO_BASE/personal/alpha" commit -q --allow-empty -m mine
     # pull.rebase=false would merge here; --ff-only must still refuse.
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=pull.rebase GIT_CONFIG_VALUE_0=false \
         run "$SEED" --conf "$CONF" --pull-only
@@ -635,8 +639,7 @@ _make_upstream_repo() {
     local origin="$1" clone="$2"
     git init -q --bare "$origin"
     git clone -q "$origin" "$clone" 2>/dev/null
-    git -C "$clone" -c user.email=test@test.com -c user.name=Test \
-        commit -q --allow-empty -m base
+    git -C "$clone" commit -q --allow-empty -m base
     git -C "$clone" push -q origin HEAD:refs/heads/main
     git -C "$clone" checkout -q -B main
     git -C "$clone" branch -q --set-upstream-to=origin/main main
@@ -688,8 +691,7 @@ _make_upstream_repo() {
 
 @test "--status reports AHEAD for a clean repo with unpushed commits" {
     _make_upstream_repo "$SANDBOX/origin.git" "$REPO_BASE/personal/ahead"
-    git -C "$REPO_BASE/personal/ahead" -c user.email=test@test.com \
-        -c user.name=Test commit -q --allow-empty -m unpushed
+    git -C "$REPO_BASE/personal/ahead" commit -q --allow-empty -m unpushed
     echo "personal  x/ahead" >> "$CONF"
     run "$SEED" --conf "$CONF" --status
     [[ "$output" == *"[AHEAD]"* ]]
@@ -699,8 +701,7 @@ _make_upstream_repo() {
 
 @test "a dirty repo with unpushed commits reports DIRTY plus both counts" {
     _make_upstream_repo "$SANDBOX/origin.git" "$REPO_BASE/personal/both"
-    git -C "$REPO_BASE/personal/both" -c user.email=test@test.com \
-        -c user.name=Test commit -q --allow-empty -m unpushed
+    git -C "$REPO_BASE/personal/both" commit -q --allow-empty -m unpushed
     echo scratch > "$REPO_BASE/personal/both/untracked.txt"
     echo "personal  x/both" >> "$CONF"
     run "$SEED" --conf "$CONF" --status
@@ -745,8 +746,7 @@ EOF
     _make_upstream_repo "$SANDBOX/origin.git" "$REPO_BASE/personal/behind"
     # Push a commit from a second clone so 'behind' has not seen it.
     git clone -q -b main "$SANDBOX/origin.git" "$SANDBOX/other" 2>/dev/null
-    git -C "$SANDBOX/other" -c user.email=test@test.com -c user.name=Test \
-        commit -q --allow-empty -m "upstream work"
+    git -C "$SANDBOX/other" commit -q --allow-empty -m "upstream work"
     git -C "$SANDBOX/other" push -q origin HEAD:refs/heads/main
     cat > "$CONF" <<EOF
 [path $REPO_BASE]
@@ -760,8 +760,7 @@ EOF
 @test "--outdated does not update remote-tracking refs" {
     _make_upstream_repo "$SANDBOX/origin.git" "$REPO_BASE/personal/behind"
     git clone -q -b main "$SANDBOX/origin.git" "$SANDBOX/other" 2>/dev/null
-    git -C "$SANDBOX/other" -c user.email=test@test.com -c user.name=Test \
-        commit -q --allow-empty -m "upstream work"
+    git -C "$SANDBOX/other" commit -q --allow-empty -m "upstream work"
     git -C "$SANDBOX/other" push -q origin HEAD:refs/heads/main
     local before
     before="$(git -C "$REPO_BASE/personal/behind" rev-parse origin/main)"
@@ -777,4 +776,128 @@ EOF
     run "$SEED" --conf "$CONF" --outdated
     [[ "$output" == *"no upstream: 2"* ]]
     [[ "$output" == *"checked: 0"* ]]
+}
+
+# ── Conf validation ───────────────────────────────────────────────────
+
+@test "a mistyped section header is an error, not an entry" {
+    printf '[path %s]\npersonal  pdbeard/alpha\n[Path %s/b]\nwork  testorg/beta\n' \
+        "$REPO_BASE" "$SANDBOX" > "$CONF"
+    run "$SEED" --conf "$CONF" --sync --dry-run
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Bad section header"*"[Path"* ]]
+    [[ "$output" != *"would"* ]]
+}
+
+@test "a relative [path] is an error" {
+    printf '[path src]\nx  me/three\n' > "$CONF"
+    run "$SEED" --conf "$CONF" --status
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"must be an absolute path"*"src"* ]]
+}
+
+@test "a relative --base is an error when entries use it" {
+    printf 'x  me/three\n' > "$CONF"
+    run "$SEED" --conf "$CONF" --base rel --status
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"must be an absolute path"*"rel"* ]]
+}
+
+@test "--outdated exits 1 when the conf is missing" {
+    run "$SEED" --conf "$SANDBOX/nope.conf" --outdated
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Config file not found"* ]]
+    [[ "$output" != *"checked:"* ]]
+}
+
+# ── Scout edge cases ──────────────────────────────────────────────────
+
+@test "--scout skips a folder whose label contains a space" {
+    rm -rf "$REPO_BASE/personal/untracked"
+    _make_repo "$REPO_BASE/my stuff/tool" "https://github.com/me/tool.git"
+    run "$SEED" --conf "$CONF" --scout
+    [[ "$output" == *"contains whitespace"* ]]
+    ! grep -q "me/tool" "$CONF"
+}
+
+@test "--scout files a repo under the most specific of nested sections, once" {
+    printf '[path %s]\n[path %s/personal]\n' "$REPO_BASE" "$REPO_BASE" > "$CONF"
+    rm -rf "$REPO_BASE/personal/untracked"
+    _make_repo "$REPO_BASE/personal/x/deep" "https://github.com/me/deep.git"
+    FZF_MOCK=select-all run "$SEED" --conf "$CONF" --scout
+    [ "$(grep -c 'me/deep' "$CONF")" -eq 1 ]
+    grep -q "^x  me/deep$" "$CONF"
+}
+
+@test "--scout treats an entry disabled with ## as known" {
+    echo "## personal  pdbeard/untracked" >> "$CONF"
+    run "$SEED" --conf "$CONF" --scout
+    [[ "$output" == *"All repos are already tracked"* ]]
+}
+
+@test "--scout shortens a header to ~ only at a path boundary" {
+    printf 'personal  pdbeard/alpha\n' > "$CONF"
+    # HOME is a string prefix of REPO_BASE ($SANDBOX/re vs $SANDBOX/repos).
+    HOME="$SANDBOX/re" run "$SEED" --conf "$CONF" --base "$REPO_BASE" --scout
+    grep -qxF "[path $REPO_BASE]" "$CONF"
+}
+
+# ── Clone and auth ────────────────────────────────────────────────────
+
+@test "--clone-only clones, offering the token to github.com only" {
+    git clone -q --bare "$REPO_BASE/personal/alpha" "$SANDBOX/gh/pdbeard/fresh.git"
+    printf '[path %s]\npersonal  pdbeard/fresh\n' "$REPO_BASE" > "$CONF"
+    # Record every git invocation, then hand off to the real git.
+    cat > "$SANDBOX/bin/git" <<WRAP
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$SANDBOX/git.log"
+exec $(command -v git) "\$@"
+WRAP
+    chmod +x "$SANDBOX/bin/git"
+    GITHUB_TOKEN=SECRET GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0="url.file://$SANDBOX/gh/.insteadOf" \
+        GIT_CONFIG_VALUE_0="https://github.com/" \
+        run "$SEED" --conf "$CONF" --clone-only
+    [ "$status" -eq 0 ]
+    [ -d "$REPO_BASE/personal/fresh/.git" ]
+    grep -q "credential.https://github.com.helper=" "$SANDBOX/git.log"
+    ! grep -q "credential.helper=" "$SANDBOX/git.log"
+}
+
+@test "--outdated skips a branch that tracks a local branch" {
+    local base
+    base="$(git -C "$REPO_BASE/personal/alpha" branch --show-current)"
+    git -C "$REPO_BASE/personal/alpha" checkout -q -b feat
+    git -C "$REPO_BASE/personal/alpha" branch -q -u "$base"
+    printf '[path %s]\npersonal  pdbeard/alpha\n' "$REPO_BASE" > "$CONF"
+    run "$SEED" --conf "$CONF" --outdated
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"could not reach"* ]]
+    [[ "$output" == *"no upstream: 1"* ]]
+}
+
+@test "an indented section header is still a header" {
+    printf '[path %s]\npersonal  pdbeard/alpha\n  [path %s/b]\nwork  testorg/beta\n' \
+        "$REPO_BASE" "$SANDBOX" > "$CONF"
+    run "$SEED" --conf "$CONF" --sync --dry-run
+    [[ "$output" == *"would clone testorg/beta → $SANDBOX/b/work/beta"* ]]
+}
+
+@test "--scout skips a folder whose label contains '#'" {
+    rm -rf "$REPO_BASE/personal/untracked"
+    _make_repo "$REPO_BASE/c#/tool" "https://github.com/me/tool.git"
+    run "$SEED" --conf "$CONF" --scout
+    [[ "$output" == *"contains whitespace or '#'"* ]]
+    ! grep -q "me/tool" "$CONF"
+}
+
+@test "--scout with no conf creates it in ~/.config, not next to the script" {
+    local home="$SANDBOX/home"
+    _make_repo "$home/git-seed-repos/w/z" "https://github.com/me/z.git"
+    ln -s "$SEED" "$SANDBOX/bin/git-seed"
+    HOME="$home" run env -u XDG_CONFIG_HOME -u CONF_FILE -u BASE_DIR \
+        "$SANDBOX/bin/git-seed" --scout
+    [ "$status" -eq 0 ]
+    grep -q "^w  me/z$" "$home/.config/git-seed/repos.conf"
+    [ ! -e "$SANDBOX/bin/repos.conf" ]
 }

@@ -15,12 +15,15 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 XDG_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/git-seed/repos.conf"
 
+# With no conf anywhere, the XDG path is the one to create (scout does) and
+# to name in errors; never a new file next to the script, which may be a
+# symlink in ~/.local/bin.
 if [[ -n "${CONF_FILE:-}" ]]; then
     CONF="$CONF_FILE"
-elif [[ -f "$XDG_CONF" ]]; then
-    CONF="$XDG_CONF"
-else
+elif [[ ! -f "$XDG_CONF" && -f "$SCRIPT_DIR/repos.conf" ]]; then
     CONF="$SCRIPT_DIR/repos.conf"
+else
+    CONF="$XDG_CONF"
 fi
 
 BASE_DIR="${BASE_DIR:-$HOME/git-seed-repos}"
@@ -49,36 +52,65 @@ load_auth() {
 }
 
 # ── Parse conf ────────────────────────────────────────────────────
-# Strips the comment and trailing whitespace from the named variable, so a
-# blank or comment-only line becomes empty. An annotation must never become
-# part of a path or a repo name; '#' is not valid in either, so cutting at
-# the first one is unambiguous.
+# Strips the comment and surrounding whitespace from the named variable, so a
+# blank or comment-only line becomes empty and an indented header still reads
+# as a header. An annotation must never become part of a path or a repo name;
+# '#' is not valid in either, so cutting at the first one is unambiguous.
 strip_conf_line() {
     local -n _l="$1"
     _l="${_l%%#*}"
+    _l="${_l#"${_l%%[![:space:]]*}"}"
     _l="${_l%"${_l##*[![:space:]]}"}"
 }
 
+# Shortens a path under $HOME to ~/... at a '/' boundary only, so /home/pat
+# does not become "~at" when HOME=/home/p.
+tilde() {
+    if [[ "$1" == "$HOME" || "$1" == "$HOME"/* ]]; then
+        printf "%s" "~${1#"$HOME"}"
+    else
+        printf "%s" "$1"
+    fi
+}
+
+# A relative base would resolve against wherever the command is run from.
+require_absolute() {
+    [[ "$1" == /* ]] && return 0
+    echo "[ERROR] $2 must be an absolute path, got: $1" >&2
+    exit 1
+}
+
+# Returns 0 and sets HEADER_PATH ('~' expanded) for a "[path DIR]" line,
+# 1 for any line not starting with '['. Exits on anything else that starts
+# with '[', so a typo like "[Path ~/x]" never silently files the entries
+# below it under the previous section.
+HEADER_PATH=""
+conf_header() {
+    [[ "$1" == \[* ]] || return 1
+    if [[ "$1" =~ ^\[path[[:space:]]+(.+)\]$ ]]; then
+        HEADER_PATH="${BASH_REMATCH[1]/#\~/$HOME}"
+        require_absolute "$HEADER_PATH" "[path] in $CONF"
+        return 0
+    fi
+    echo "[ERROR] Bad section header in $CONF: $1 (expected [path DIR])" >&2
+    exit 1
+}
 
 # Calls: callback base_dir dir owner/repo
 # Handles [path] sections, skips comments and blank lines,
 # warns on malformed entries. Entries above any [path] section
-# use BASE_DIR as fallback.
+# use BASE_DIR as fallback. Main checks the file exists and its headers are
+# valid before any command runs, since an exit in here may only end a subshell.
 parse_conf() {
     local callback="$1"
     local current_base="$BASE_DIR"
-
-    if [[ ! -f "$CONF" ]]; then
-        echo "[ERROR] Config file not found: $CONF" >&2
-        exit 1
-    fi
 
     while IFS= read -r line; do
         strip_conf_line line
         [[ -z "$line" ]] && continue
 
-        if [[ "$line" =~ ^\[path[[:space:]]+(.+)\]$ ]]; then
-            current_base="${BASH_REMATCH[1]/#\~/$HOME}"
+        if conf_header "$line"; then
+            current_base="$HEADER_PATH"
             continue
         fi
 
@@ -106,25 +138,25 @@ parse_conf() {
 get_conf_paths() {
     local -n _out="$1"
 
-    [[ ! -f "$CONF" ]] && _out["$BASE_DIR"]=1 && return
-
     local seen_path_section=false
     local has_pre_section_entries=false
 
-    while IFS= read -r line; do
-        strip_conf_line line
-        [[ -z "$line" ]] && continue
+    if [[ -f "$CONF" ]]; then
+        while IFS= read -r line; do
+            strip_conf_line line
+            [[ -z "$line" ]] && continue
 
-        if [[ "$line" =~ ^\[path[[:space:]]+(.+)\]$ ]]; then
-            seen_path_section=true
-            local p="${BASH_REMATCH[1]/#\~/$HOME}"
-            _out["$p"]=1
-        elif [[ "$seen_path_section" == false ]]; then
-            has_pre_section_entries=true
-        fi
-    done < "$CONF"
+            if conf_header "$line"; then
+                seen_path_section=true
+                _out["$HEADER_PATH"]=1
+            elif [[ "$seen_path_section" == false ]]; then
+                has_pre_section_entries=true
+            fi
+        done < "$CONF"
+    fi
 
     if [[ "$seen_path_section" == false || "$has_pre_section_entries" == true ]]; then
+        require_absolute "$BASE_DIR" "--base / \$BASE_DIR"
         _out["$BASE_DIR"]=1
     fi
 }
@@ -371,10 +403,8 @@ pick_select() {
                   --preview "$preview" \
                   --preview-window='right,60%,wrap')" || return 1
     else
-        local -a arr=()
-        while IFS= read -r _line; do
-            arr+=("$_line")
-        done <<< "$lines"
+        local -a arr
+        mapfile -t arr <<< "$lines"
         local i=1
         for entry in "${arr[@]}"; do
             local label="${entry%%$'\t'*}"
@@ -534,21 +564,25 @@ outdated_repos() {
         # into FETCH_HEAD unconditionally and so always prints a line; with
         # ":refs/remotes/<remote>/x" git compares against the tracking ref and
         # stays silent when there is nothing new.
-        local upstream=""
-        upstream="$(git -C "$path" rev-parse --abbrev-ref \
-            --symbolic-full-name '@{upstream}' 2>/dev/null)" || upstream=""
-        if [[ -z "$upstream" ]]; then
+        #
+        # Remote and branch come from the branch config, not from splitting
+        # "origin/main", which breaks on remotes with a '/' in their name.
+        # Remote '.' means the upstream is a local branch: nothing to fetch.
+        local branch="" remote="" merge=""
+        branch="$(git -C "$path" symbolic-ref --short -q HEAD)" || branch=""
+        if [[ -n "$branch" ]]; then
+            remote="$(git -C "$path" config "branch.$branch.remote")" || remote=""
+            merge="$(git -C "$path" config "branch.$branch.merge")" || merge=""
+        fi
+        if [[ -z "$remote" || -z "$merge" || "$remote" == "." ]]; then
             skipped=$((skipped + 1))
             continue
         fi
-
-        local remote="${upstream%%/*}"
-        local branch="${upstream#*/}"
         checked=$((checked + 1))
 
         local out status=0
         out="$(git -C "$path" ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} fetch --dry-run "$remote" \
-            "refs/heads/$branch:refs/remotes/$remote/$branch" 2>&1)" || status=$?
+            "$merge:refs/remotes/$remote/${merge#refs/heads/}" 2>&1)" || status=$?
 
         if (( status != 0 )); then
             echo "[ERROR] $repo: could not reach $remote" >&2
@@ -568,27 +602,29 @@ outdated_repos() {
     if (( failed > 0 )); then printf "  unreachable: %d" "$failed" >&2; fi
     printf "\n" >&2
     if (( behind > 0 )); then
-        echo "[HINT] Try: git-seed --outdated | xargs -I{} git -C {} pull" >&2
+        echo "[HINT] Try: git-seed --outdated | xargs -I{} git -C {} pull --ff-only" >&2
     fi
 }
 
 # ── Scout: insert helper ──────────────────────────────────────────
 # Adds "$dir  $owner_repo" under the first [path] section that resolves to
 # $search_dir, or appends a fresh section if there is none. Headers are read
-# the way parse_conf reads them: comment and trailing space stripped, '~'
+# the way parse_conf reads them: comment and surrounding space stripped, '~'
 # expanded. The result is written back through the existing file, so a
 # symlinked conf stays a symlink and keeps its permissions.
 scout_insert_entry() {
     local search_dir="$1" dir="$2" owner_repo="$3"
     local tmp
-    [[ -f "$CONF" ]] || : > "$CONF" || return 1
+    if [[ ! -f "$CONF" ]]; then
+        mkdir -p "$(dirname "$CONF")" && : > "$CONF" || return 1
+    fi
     tmp="$(mktemp)" || return 1
 
     if ! awk -v home="$HOME" -v want="$search_dir" -v entry="$dir  $owner_repo" \
-             -v new_hdr="[path ${search_dir/#$HOME/\~}]" '
+             -v new_hdr="[path $(tilde "$search_dir")]" '
         {
             lines[NR] = $0
-            l = $0; sub(/#.*/, "", l); sub(/[ \t]+$/, "", l)
+            l = $0; sub(/#.*/, "", l); sub(/^[ \t]+/, "", l); sub(/[ \t]+$/, "", l)
         }
         l ~ /^\[path[ \t]+.+\]$/ {
             p = l; sub(/^\[path[ \t]+/, "", p); sub(/\]$/, "", p); sub(/^~/, home, p)
@@ -620,20 +656,18 @@ scout_insert_entry() {
 # ── Scout: collect untracked candidates ───────────────────────────
 # Emits one TAB-separated row per candidate:
 #   owner/repo<TAB>dir<TAB>search_dir<TAB>repo_path<TAB>remote
+# Searches CONF_PATHS, filled by main. The longest paths go first, so a repo
+# under nested sections is filed under the most specific one, and only once.
 scout_collect_candidates() {
-    declare -A search_paths
-    get_conf_paths search_paths
-
-    declare -A known
+    declare -A known seen
     if [[ -f "$CONF" ]]; then
         while IFS= read -r line; do
-            local stripped="${line#\#}"
-            stripped="${stripped#"${stripped%%[! ]*}"}"
-            [[ "$stripped" =~ ^\[path ]] && continue
             # Commented-out entries still count as known, so scout does not
-            # re-offer a repo the user deliberately disabled. Inline comments
-            # are dropped so they don't end up inside the repo name.
-            stripped="${stripped%%#*}"
+            # re-offer a repo the user deliberately disabled: drop every
+            # leading '#' and space, then read the line like any other.
+            local stripped="${line#"${line%%[!#[:space:]]*}"}"
+            strip_conf_line stripped
+            [[ "$stripped" == \[* ]] && continue
             local label repo rest
             read -r label repo rest <<< "$stripped"
             repo="${repo%"${repo##*[![:space:]/]}"}"
@@ -641,9 +675,10 @@ scout_collect_candidates() {
         done < "$CONF"
     fi
 
-    for search_dir in "${!search_paths[@]}"; do
+    local search_dir
+    while IFS= read -r search_dir; do
         [[ ! -d "$search_dir" ]] && continue
-        printf "[INFO] Scanning %s...\n" "${search_dir/#$HOME/\~}" >&2
+        printf "[INFO] Scanning %s...\n" "$(tilde "$search_dir")" >&2
 
         while IFS= read -r gitdir; do
             local repo_path="${gitdir%/.git}"
@@ -651,7 +686,16 @@ scout_collect_candidates() {
 
             # A repo directly in search_dir has no subdir label to file it under.
             [[ "$rel_path" != */* ]] && continue
+            [[ -n "${seen[$repo_path]:-}" ]] && continue
+            seen["$repo_path"]=1
             local dir="${rel_path%/*}" folder_name="${rel_path##*/}"
+
+            # Conf fields are whitespace-separated and '#' starts a comment,
+            # so a label containing either cannot be written as an entry.
+            if [[ "$dir" =~ [[:space:]#] ]]; then
+                echo "[WARN]  Skipping $(tilde "$repo_path"): folder '$dir' contains whitespace or '#'" >&2
+                continue
+            fi
 
             # Only GitHub repos can be entries, since --sync clones from
             # github.com. Repo names may contain dots (user/site.github.io).
@@ -660,7 +704,7 @@ scout_collect_candidates() {
             if [[ "$remote" =~ github\.com[:/]([^/]+/[^/]+)$ ]]; then
                 owner_repo="${BASH_REMATCH[1]%.git}"
             else
-                echo "[WARN]  Skipping ${repo_path/#$HOME/\~}: origin is not a GitHub repo" >&2
+                echo "[WARN]  Skipping $(tilde "$repo_path"): origin is not a GitHub repo" >&2
                 continue
             fi
 
@@ -669,14 +713,15 @@ scout_collect_candidates() {
             # An entry resolves to <dir>/<repo name>. A clone in a folder with
             # another name would read as MISSING, and --sync would clone it again.
             if [[ "$folder_name" != "${owner_repo##*/}" ]]; then
-                echo "[WARN]  Skipping ${repo_path/#$HOME/\~}: folder name differs from repo name '${owner_repo##*/}'" >&2
+                echo "[WARN]  Skipping $(tilde "$repo_path"): folder name differs from repo name '${owner_repo##*/}'" >&2
                 continue
             fi
 
             printf "%s\t%s\t%s\t%s\t%s\n" \
                 "$owner_repo" "$dir" "$search_dir" "$repo_path" "$remote"
         done < <(find "$search_dir" -name ".git" -type d -prune 2>/dev/null | sort)
-    done
+    done < <(for p in "${!CONF_PATHS[@]}"; do printf "%s\t%s\n" "${#p}" "$p"; done \
+        | sort -rn | cut -f2-)
 }
 
 # ── Scout: dispatcher (fzf if present, else interactive prompt) ───
@@ -689,17 +734,38 @@ scout_repos() {
         return 0
     fi
 
+    local total selected added=0
+    total="$(printf "%s\n" "$candidates" | wc -l | tr -d ' ')"
     if command -v fzf &>/dev/null; then
-        scout_fzf "$candidates"
+        selected="$(scout_pick_fzf "$candidates" "$total")"
     else
-        scout_prompt "$candidates"
+        selected="$(scout_pick_prompt "$candidates")"
+    fi
+
+    local owner_repo dir search_dir
+    while IFS=$'\t' read -r owner_repo dir search_dir _; do
+        [[ -z "$owner_repo" ]] && continue
+        if scout_insert_entry "$search_dir" "$dir" "$owner_repo"; then
+            echo "[ADDED] $dir  $owner_repo"
+            added=$((added + 1))
+        else
+            echo "[ERROR] Failed to add $owner_repo" >&2
+        fi
+    done <<< "$selected"
+
+    echo ""
+    if [[ "$added" -eq 0 ]]; then
+        echo "[OK] $total untracked repo(s) found, none added."
+    else
+        echo "[DONE] Added $added of $total untracked repo(s) to repos.conf."
+        echo "[HINT] Try: git-seed --browse"
     fi
 }
 
-scout_fzf() {
-    local candidates="$1"
-    local total
-    total="$(printf "%s\n" "$candidates" | wc -l | tr -d ' ')"
+# Both pickers read candidate rows and print the chosen ones on stdout;
+# anything meant for the user goes to stderr.
+scout_pick_fzf() {
+    local candidates="$1" total="$2"
     echo "[INFO] Found $total untracked repo(s). TAB to multi-select, ENTER to add." >&2
 
     # Single quotes are deliberate: {1}..{5} are substituted by fzf, and the
@@ -726,66 +792,27 @@ if [ -f "$rpath/README.md" ]; then
 fi
 '
 
-    local selected
-    if ! selected="$(printf "%s\n" "$candidates" \
+    # Esc in fzf exits non-zero; that just means nothing was chosen.
+    printf "%s\n" "$candidates" \
         | fzf --multi --delimiter=$'\t' --with-nth=1,2 \
               --preview "$preview" --preview-window='right,60%,wrap' \
-              --header='TAB: select  ENTER: add selected to repos.conf')"; then
-        echo "[OK] No candidates selected."
-        return 0
-    fi
-    [[ -z "$selected" ]] && { echo "[OK] No candidates selected."; return 0; }
-
-    local added=0
-    while IFS=$'\t' read -r owner_repo dir search_dir repo_path remote; do
-        [[ -z "$owner_repo" ]] && continue
-        if scout_insert_entry "$search_dir" "$dir" "$owner_repo"; then
-            echo "[ADDED] $dir  $owner_repo"
-            added=$((added + 1))
-        else
-            echo "[ERROR] Failed to add $owner_repo" >&2
-        fi
-    done <<< "$selected"
-
-    echo ""
-    if [[ "$added" -eq 0 ]]; then
-        echo "[OK] $total untracked repo(s) found, none added."
-    else
-        echo "[DONE] Added $added of $total untracked repo(s) to repos.conf."
-        echo "[HINT] Try: git-seed --browse"
-    fi
+              --header='TAB: select  ENTER: add selected to repos.conf' || true
 }
 
-scout_prompt() {
-    local candidates="$1"
-    local found=0 added=0
-
-    while IFS=$'\t' read -r owner_repo dir search_dir repo_path remote; do
-        found=$((found + 1))
-        echo ""
-        echo "  Found:  $owner_repo"
-        echo "  Path:   $repo_path"
-        [[ -n "$remote" ]] && echo "  Remote: $remote"
-
-        printf "  Add to repos.conf under '%s'? [y/N] " "$dir"
-        local answer; read -r answer </dev/tty
-        [[ ! "$answer" =~ ^[Yy]$ ]] && continue
-
-        if scout_insert_entry "$search_dir" "$dir" "$owner_repo"; then
-            echo "  [ADDED] $dir  $owner_repo"
-            added=$((added + 1))
-        else
-            echo "  [ERROR] Failed to update conf" >&2
-        fi
+scout_pick_prompt() {
+    local candidates="$1" row owner_repo dir repo_path remote answer
+    while IFS= read -r row; do
+        IFS=$'\t' read -r owner_repo dir _ repo_path remote <<< "$row"
+        {
+            echo ""
+            echo "  Found:  $owner_repo"
+            echo "  Path:   $repo_path"
+            [[ -n "$remote" ]] && echo "  Remote: $remote"
+            printf "  Add to repos.conf under '%s'? [y/N] " "$dir"
+        } >&2
+        read -r answer </dev/tty
+        if [[ "$answer" =~ ^[Yy]$ ]]; then printf "%s\n" "$row"; fi
     done <<< "$candidates"
-
-    echo ""
-    if [[ "$added" -eq 0 ]]; then
-        echo "[OK] $found untracked repo(s) found, none added."
-    else
-        echo "[DONE] Added $added of $found untracked repo(s) to repos.conf."
-        echo "[HINT] Try: git-seed --browse"
-    fi
 }
 
 # ── List repos via gh ─────────────────────────────────────────────
@@ -947,6 +974,18 @@ if [[ "$DRY_RUN" == true ]]; then
         *) echo "[ERROR] --dry-run only applies to --sync, --clone-only and --pull-only" >&2
            exit 1 ;;
     esac
+fi
+
+# Validate the conf here, in the main shell: an exit raised later inside a
+# pipeline or process substitution would only end that subshell. Scout may
+# run without a conf, since it can create one.
+if [[ "$COMMAND" != list ]]; then
+    if [[ "$COMMAND" != scout && ! -f "$CONF" ]]; then
+        echo "[ERROR] Config file not found: $CONF" >&2
+        exit 1
+    fi
+    declare -A CONF_PATHS
+    get_conf_paths CONF_PATHS
 fi
 
 case "$COMMAND" in

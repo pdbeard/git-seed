@@ -36,6 +36,9 @@ libs          someuser/a-library
 
 Each `[path]` section sets the base directory for the entries below it. The subdirectory is relative to that path. Entries above any `[path]` section fall back to `~/git-seed-repos`.
 
+`[path]` and `--base` must be absolute (or start with `~`). Any other line starting
+with `[` is an error, so a typo in a header can't file entries under the wrong section.
+
 Lines beginning with `#` are ignored, as is anything after a `#` on an entry line —
 so entries can be annotated:
 
@@ -145,7 +148,7 @@ says nothing about commits other people have pushed. For that, use
 
 ```bash
 git-seed --outdated                                # list repos needing a pull
-git-seed --outdated | xargs -I{} git -C {} pull    # pull them
+git-seed --outdated | xargs -I{} git -C {} pull --ff-only    # pull them
 ```
 
 Asks each remote directly whether the tracked branch has commits you do not
@@ -183,6 +186,8 @@ another host.
   it is a separate command rather than part of `--status`.
 - **Tabs and newlines in paths.** Repo paths containing either will corrupt
   tab-delimited output. Not escaped.
+- **Spaces in subdirectory labels.** Config fields are whitespace-separated, so a
+  label like `my stuff` can't be written. `--scout` skips such folders with a warning.
 
 ## Development
 
