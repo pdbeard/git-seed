@@ -59,7 +59,8 @@ then `$BASE_DIR`, then `~/git-seed-repos`.
 git-seed <command> [options]
 
 Manifest commands:
-  --sync           Clone missing repos and pull existing ones
+  --sync           Clone missing repos and pull existing ones (fast-forward
+                   only). Exits 1 if any repo failed.
   --clone-only     Clone missing repos, skip existing
   --pull-only      Pull existing repos, skip missing
   --scout          Scan paths defined in conf for untracked git repos and
@@ -74,6 +75,8 @@ Frontend commands:
   --where <repo>   Look up the local path for owner/repo (or basename).
                    Prints path on stdout.
   --recent [N]     List N most-recently-committed tracked repos (default 20).
+  --mine           Modifier for --recent: only count commits by your
+                   git user.email (shows repos you actively work in).
   --dirty          List tracked repos with uncommitted changes.
   --outdated       Check each remote for commits you have not pulled.
                    Requires network access. Prints one path per repo
@@ -84,6 +87,7 @@ Frontend commands:
 Options:
   --dry-run        Print what would happen without making any changes
                    (works with --sync, --clone-only, --pull-only)
+  --dir <label>    Directory label for --list output (default: projects)
   --conf FILE      Use a specific config file
   --base DIR       Fallback base dir for entries with no [path] section
                    (default: ~/git-seed-repos)
@@ -156,6 +160,9 @@ git-seed uses authentication in the following order:
 1. `GITHUB_TOKEN` environment variable
 2. `gh` CLI (`gh auth login`)
 3. No auth (public repos only)
+
+The token is only ever offered to `https://github.com`, never to a remote on
+another host.
 
 ## Requirements
 

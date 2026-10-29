@@ -32,29 +32,34 @@ LIST_DIR="projects"
 SYNC_ERRORS=0
 
 # ── Auth ──────────────────────────────────────────────────────────
-_TOKEN=""
+# Sets GIT_AUTH to the git options that supply the token, or leaves it empty.
+# Call it directly, never in $(...), or the assignment is lost. Expand with
+# ${GIT_AUTH[@]+"${GIT_AUTH[@]}"}: bash 4.3 treats an empty array as unset.
+# The helper is scoped to github.com so the token is never offered to a
+# remote on another host.
+GIT_AUTH=()
 
-get_token() {
-    if [[ "$_TOKEN" == "__none__" ]]; then
-        return
+load_auth() {
+    local token="${GITHUB_TOKEN:-}"
+    if [[ -z "$token" ]] && command -v gh &>/dev/null; then
+        token="$(gh auth token 2>/dev/null || true)"
     fi
-    if [[ -n "$_TOKEN" ]]; then
-        echo "$_TOKEN"
-        return
-    fi
-    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-        _TOKEN="$GITHUB_TOKEN"
-    elif command -v gh &>/dev/null; then
-        _TOKEN="$(gh auth token 2>/dev/null || true)"
-    fi
-    if [[ -z "$_TOKEN" ]]; then
-        _TOKEN="__none__"
-        return
-    fi
-    echo "$_TOKEN"
+    [[ -z "$token" ]] && return 0
+    GIT_AUTH=(-c "credential.https://github.com.helper=!f() { echo username=x-access-token; echo password=$token; }; f")
 }
 
 # ── Parse conf ────────────────────────────────────────────────────
+# Strips the comment and trailing whitespace from the named variable, so a
+# blank or comment-only line becomes empty. An annotation must never become
+# part of a path or a repo name; '#' is not valid in either, so cutting at
+# the first one is unambiguous.
+strip_conf_line() {
+    local -n _l="$1"
+    _l="${_l%%#*}"
+    _l="${_l%"${_l##*[![:space:]]}"}"
+}
+
+
 # Calls: callback base_dir dir owner/repo
 # Handles [path] sections, skips comments and blank lines,
 # warns on malformed entries. Entries above any [path] section
@@ -69,14 +74,7 @@ parse_conf() {
     fi
 
     while IFS= read -r line; do
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "${line// }" ]]           && continue
-
-        # Strip inline comments before anything else; an annotation must
-        # never become part of a path or a repo name. '#' is not valid in
-        # either, so this is unambiguous.
-        line="${line%%#*}"
-        line="${line%"${line##*[![:space:]]}"}"
+        strip_conf_line line
         [[ -z "$line" ]] && continue
 
         if [[ "$line" =~ ^\[path[[:space:]]+(.+)\]$ ]]; then
@@ -114,11 +112,7 @@ get_conf_paths() {
     local has_pre_section_entries=false
 
     while IFS= read -r line; do
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "${line// }" ]]           && continue
-
-        line="${line%%#*}"
-        line="${line%"${line##*[![:space:]]}"}"
+        strip_conf_line line
         [[ -z "$line" ]] && continue
 
         if [[ "$line" =~ ^\[path[[:space:]]+(.+)\]$ ]]; then
@@ -141,7 +135,7 @@ do_sync() {
     local dest
     dest="$base_dir/$dir/$(basename "$repo")"
 
-    if [[ -d "$dest" ]] && ! is_empty_dir "$dest"; then
+    if [[ -e "$dest" ]] && ! is_empty_dir "$dest"; then
         # Never clone into or over an occupied path that is not a clone;
         # whatever is there belongs to the user.
         if ! is_git_repo "$dest"; then
@@ -153,15 +147,21 @@ do_sync() {
             echo "[SKIP]  $repo (already exists)"
             return
         fi
+        if ! git -C "$dest" symbolic-ref HEAD &>/dev/null; then
+            echo "[SKIP]  $repo (detached HEAD — checkout a branch to pull)"
+            return
+        fi
+        if ! git -C "$dest" rev-parse --abbrev-ref '@{upstream}' &>/dev/null; then
+            echo "[SKIP]  $repo (no upstream — nothing to pull from)"
+            return
+        fi
         if [[ "$DRY_RUN" == true ]]; then
             echo "[DRY]   would pull $repo"
         else
-            if ! git -C "$dest" symbolic-ref HEAD &>/dev/null; then
-                echo "[SKIP]  $repo (detached HEAD — checkout a branch to pull)"
-                return
-            fi
             echo "[PULL]  $repo"
-            git -C "$dest" pull || {
+            # Fast-forward only: a diverged branch fails cleanly instead of
+            # being left mid-merge partway through a bulk sync.
+            git -C "$dest" ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} pull --ff-only || {
                 echo "[ERROR] Failed to pull $repo"
                 SYNC_ERRORS=$((SYNC_ERRORS + 1))
                 return 1
@@ -180,30 +180,19 @@ do_sync() {
         return
     fi
 
-    local token
-    token="$(get_token)"
-    local url="https://github.com/${repo}.git"
     mkdir -p "$base_dir/$dir"
     echo "[CLONE] $repo → $dest"
-
-    if [[ -n "$token" ]]; then
-        git -c "credential.helper=!f() { echo username=x-access-token; echo password=$token; }; f" \
-            clone "$url" "$dest" || {
-                echo "[ERROR] Failed to clone $repo"
-                SYNC_ERRORS=$((SYNC_ERRORS + 1))
-                return 1
-            }
-    else
-        git clone "$url" "$dest" || {
-            echo "[ERROR] Failed to clone $repo"
-            SYNC_ERRORS=$((SYNC_ERRORS + 1))
-            return 1
-        }
-    fi
+    git ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} clone "https://github.com/${repo}.git" "$dest" || {
+        echo "[ERROR] Failed to clone $repo"
+        SYNC_ERRORS=$((SYNC_ERRORS + 1))
+        return 1
+    }
 }
 
 # Shared tail for --sync / --clone-only / --pull-only.
+# Exits non-zero when any repo failed, so scripts and cron can tell.
 run_sync() {
+    [[ "$DRY_RUN" == false ]] && load_auth
     parse_conf do_sync
     echo ""
     if [[ "$SYNC_ERRORS" -gt 0 ]]; then
@@ -212,6 +201,7 @@ run_sync() {
     if [[ "$DRY_RUN" == false ]]; then
         echo "[HINT] Try: git-seed --browse"
     fi
+    (( SYNC_ERRORS == 0 ))
 }
 
 # ── Status callback ───────────────────────────────────────────────
@@ -262,7 +252,7 @@ do_status() {
     local dest
     dest="$base_dir/$dir/$(basename "$repo")"
 
-    if [[ ! -d "$dest" ]] || is_empty_dir "$dest"; then
+    if [[ ! -e "$dest" ]] || is_empty_dir "$dest"; then
         printf "%-10s%s\n" "[MISSING]" "$repo"
         STATUS_MISSING=$((STATUS_MISSING + 1))
         return
@@ -362,11 +352,6 @@ inspect_repo() {
     done < <(git -C "$path" status --porcelain=v2 --branch 2>/dev/null)
 }
 
-is_dirty() {
-    local path="$1"
-    [[ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]]
-}
-
 # ── Picker shared by --browse / --open ───────────────────────────
 # Reads "label<TAB>path" lines on stdin, prints the chosen path to stdout.
 # Uses fzf with preview if present, otherwise a numbered prompt.
@@ -446,24 +431,28 @@ browse_repos() {
 
 # ── --where ───────────────────────────────────────────────────────
 where_repo() {
-    local target="$1"
+    local target="$1" repo path
+    local -a by_name=()
 
-    # Exact owner/repo match wins.
+    # Exact owner/repo match wins; otherwise fall back to the repo name
+    # (e.g. "intermcli" -> "pdbeard/intermcli"), but only if it is unique.
     while IFS=$'\t' read -r repo path; do
         if [[ "$repo" == "$target" ]]; then
             printf "%s\n" "$path"
             return 0
         fi
+        [[ "${repo##*/}" == "$target" ]] && by_name+=("$path")
     done < <(parse_conf do_emit)
 
-    # Fall back to basename match (e.g. "intermcli" -> "pdbeard/intermcli").
-    while IFS=$'\t' read -r repo path; do
-        if [[ "$(basename "$repo")" == "$target" ]]; then
-            printf "%s\n" "$path"
-            return 0
-        fi
-    done < <(parse_conf do_emit)
-
+    if (( ${#by_name[@]} == 1 )); then
+        printf "%s\n" "${by_name[0]}"
+        return 0
+    fi
+    if (( ${#by_name[@]} > 1 )); then
+        echo "[ERROR] '$target' matches several repos; use owner/repo:" >&2
+        printf "  %s\n" "${by_name[@]}" >&2
+        return 1
+    fi
     echo "[ERROR] No manifest entry matches: $target" >&2
     return 1
 }
@@ -496,7 +485,8 @@ recent_repos() {
 # ── --dirty ───────────────────────────────────────────────────────
 dirty_repos() {
     emit_existing | while IFS=$'\t' read -r r p; do
-        if is_dirty "$p"; then printf "%s\n" "$p"; fi
+        inspect_repo "$p"
+        if (( REPO_CHANGES > 0 )); then printf "%s\n" "$p"; fi
     done
 }
 
@@ -519,7 +509,9 @@ open_repo() {
     local path
     path="$(browse_repos)" || exit 1
     [[ -z "$path" ]] && exit 1
-    exec "$editor" "$path"
+    # Unquoted on purpose: EDITOR often carries flags, e.g. "code --wait".
+    # shellcheck disable=SC2086
+    exec $editor "$path"
 }
 
 # ── --outdated ────────────────────────────────────────────────────
@@ -530,8 +522,8 @@ open_repo() {
 # parsing, and therefore no dependence on git's wording or the locale. It
 # contacts the network but does not update refs, so --status stays unaffected.
 outdated_repos() {
-    local token checked=0 behind=0 failed=0 skipped=0
-    token="$(get_token)"
+    local checked=0 behind=0 failed=0 skipped=0
+    load_auth
 
     while IFS=$'\t' read -r repo path; do
         # Only the branch we actually track can be outdated. Without this the
@@ -555,15 +547,8 @@ outdated_repos() {
         checked=$((checked + 1))
 
         local out status=0
-        if [[ -n "$token" ]]; then
-            out="$(git -C "$path" \
-                -c "credential.helper=!f() { echo username=x-access-token; echo password=$token; }; f" \
-                fetch --dry-run "$remote" \
-                "refs/heads/$branch:refs/remotes/$remote/$branch" 2>&1)" || status=$?
-        else
-            out="$(git -C "$path" fetch --dry-run "$remote" \
-                "refs/heads/$branch:refs/remotes/$remote/$branch" 2>&1)" || status=$?
-        fi
+        out="$(git -C "$path" ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} fetch --dry-run "$remote" \
+            "refs/heads/$branch:refs/remotes/$remote/$branch" 2>&1)" || status=$?
 
         if (( status != 0 )); then
             echo "[ERROR] $repo: could not reach $remote" >&2
@@ -588,49 +573,48 @@ outdated_repos() {
 }
 
 # ── Scout: insert helper ──────────────────────────────────────────
-# Adds "$dir  $owner_repo" under the matching [path "$search_dir"] section,
-# or appends a fresh section if one isn't there yet.
+# Adds "$dir  $owner_repo" under the first [path] section that resolves to
+# $search_dir, or appends a fresh section if there is none. Headers are read
+# the way parse_conf reads them: comment and trailing space stripped, '~'
+# expanded. The result is written back through the existing file, so a
+# symlinked conf stays a symlink and keeps its permissions.
 scout_insert_entry() {
     local search_dir="$1" dir="$2" owner_repo="$3"
+    local tmp
+    [[ -f "$CONF" ]] || : > "$CONF" || return 1
+    tmp="$(mktemp)" || return 1
 
-    local section_header_tilde="[path ${search_dir/#$HOME/\~}]"
-    local section_header_full="[path $search_dir]"
-    local section_header=""
-    if grep -qF "$section_header_tilde" "$CONF" 2>/dev/null; then
-        section_header="$section_header_tilde"
-    elif grep -qF "$section_header_full" "$CONF" 2>/dev/null; then
-        section_header="$section_header_full"
-    fi
-
-    if [[ -n "$section_header" ]]; then
-        local tmp
-        tmp="$(mktemp)"
-        if awk -v hdr="$section_header" -v entry="$dir  $owner_repo" '
-            BEGIN { in_section=0; last_entry_line=0; header_line=0 }
-            $0 == hdr { in_section=1; header_line=NR }
-            in_section && /^\[path / && $0 != hdr { in_section=0 }
-            in_section && /^[^#\[]/ && NF { last_entry_line=NR }
-            { lines[NR]=$0 }
-            END {
-                insert_after = (last_entry_line > 0) ? last_entry_line : header_line
-                for (i=1; i<=NR; i++) {
-                    print lines[i]
-                    if (i==insert_after) print entry
-                }
+    if ! awk -v home="$HOME" -v want="$search_dir" -v entry="$dir  $owner_repo" \
+             -v new_hdr="[path ${search_dir/#$HOME/\~}]" '
+        {
+            lines[NR] = $0
+            l = $0; sub(/#.*/, "", l); sub(/[ \t]+$/, "", l)
+        }
+        l ~ /^\[path[ \t]+.+\]$/ {
+            p = l; sub(/^\[path[ \t]+/, "", p); sub(/\]$/, "", p); sub(/^~/, home, p)
+            in_section = (p == want && !header_line)
+            if (in_section) header_line = NR
+            next
+        }
+        in_section && l ~ /[^ \t]/ { last_entry_line = NR }
+        END {
+            insert_after = last_entry_line ? last_entry_line : header_line
+            for (i = 1; i <= NR; i++) {
+                print lines[i]
+                if (i == insert_after) print entry
             }
-        ' "$CONF" > "$tmp"; then
-            if ! mv "$tmp" "$CONF"; then
-                rm -f "$tmp"
-                return 1
-            fi
-        else
-            rm -f "$tmp"
-            return 1
-        fi
-    else
-        printf "\n%s\n%s\n" "$section_header_tilde" "$dir  $owner_repo" >> "$CONF"
+            if (!insert_after) printf "\n%s\n%s\n", new_hdr, entry
+        }
+    ' "$CONF" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
     fi
-    return 0
+
+    if ! cat "$tmp" > "$CONF"; then
+        echo "[ERROR] Could not write $CONF; updated copy kept at $tmp" >&2
+        return 1
+    fi
+    rm -f "$tmp"
 }
 
 # ── Scout: collect untracked candidates ───────────────────────────
@@ -665,24 +649,29 @@ scout_collect_candidates() {
             local repo_path="${gitdir%/.git}"
             local rel_path="${repo_path#"$search_dir"/}"
 
-            local dir folder_name
-            folder_name="${rel_path##*/}"
-            if [[ "$rel_path" == */* ]]; then
-                dir="${rel_path%/*}"
-            else
-                dir=""
-            fi
+            # A repo directly in search_dir has no subdir label to file it under.
+            [[ "$rel_path" != */* ]] && continue
+            local dir="${rel_path%/*}" folder_name="${rel_path##*/}"
 
+            # Only GitHub repos can be entries, since --sync clones from
+            # github.com. Repo names may contain dots (user/site.github.io).
             local remote owner_repo
             remote=$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)
-            if [[ "$remote" =~ github\.com[:/]([^/]+/[^/.]+)(\.git)?$ ]]; then
-                owner_repo="${BASH_REMATCH[1]}"
+            if [[ "$remote" =~ github\.com[:/]([^/]+/[^/]+)$ ]]; then
+                owner_repo="${BASH_REMATCH[1]%.git}"
             else
-                owner_repo="$folder_name"
+                echo "[WARN]  Skipping ${repo_path/#$HOME/\~}: origin is not a GitHub repo" >&2
+                continue
             fi
 
             [[ -n "${known[$owner_repo]:-}" ]] && continue
-            [[ -z "$dir" ]] && continue
+
+            # An entry resolves to <dir>/<repo name>. A clone in a folder with
+            # another name would read as MISSING, and --sync would clone it again.
+            if [[ "$folder_name" != "${owner_repo##*/}" ]]; then
+                echo "[WARN]  Skipping ${repo_path/#$HOME/\~}: folder name differs from repo name '${owner_repo##*/}'" >&2
+                continue
+            fi
 
             printf "%s\t%s\t%s\t%s\t%s\n" \
                 "$owner_repo" "$dir" "$search_dir" "$repo_path" "$remote"
@@ -805,9 +794,13 @@ list_repos() {
         echo "[ERROR] 'gh' CLI required for --list. Run: gh auth login" >&2
         exit 1
     fi
+    local limit=1000 repos
+    repos="$(gh repo list --limit "$limit" --json nameWithOwner --jq '.[].nameWithOwner')"
     echo "# Paste into repos.conf:"
-    gh repo list --limit 200 --json nameWithOwner --jq '.[].nameWithOwner' | \
-        awk -v dir="$LIST_DIR" '{ print dir "  " $0 }'
+    [[ -n "$repos" ]] && awk -v dir="$LIST_DIR" '{ print dir "  " $0 }' <<< "$repos"
+    if (( $(wc -l <<< "$repos") >= limit )); then
+        echo "[WARN]  Stopped at $limit repos; some may be missing from this list" >&2
+    fi
 }
 
 # ── Usage ─────────────────────────────────────────────────────────
@@ -816,8 +809,9 @@ usage() {
 Usage: git-seed <command> [options]
 
 Manifest commands:
-  --sync           Clone missing repos and pull existing ones
-  --clone-only     Clone missing repos, skip existing
+  --sync           Clone missing repos and pull existing ones (fast-forward
+                   only). Exits 1 if any repo failed.
+  --clone-only    Clone missing repos, skip existing
   --pull-only      Pull existing repos, skip missing
   --scout          Scan paths defined in conf for untracked git repos and
                    interactively offer to add them (multi-select fzf if present)
@@ -838,7 +832,6 @@ Frontend commands:
   --outdated       Check each remote for commits you have not pulled.
                    Requires network access. Prints one path per repo
                    that needs a pull; summary goes to stderr.
-                   One path per line.
   --open [editor]  Run --browse, then open the selection in editor.
                    Editor defaults: \$EDITOR, then code, then vim.
 
@@ -863,8 +856,9 @@ Composition examples:
 
 Config file lookup order:
   1. --conf FILE
-  2. ~/.config/git-seed/repos.conf  (or \$XDG_CONFIG_HOME/git-seed/repos.conf)
-  3. <script dir>/repos.conf
+  2. \$CONF_FILE
+  3. ~/.config/git-seed/repos.conf  (or \$XDG_CONFIG_HOME/git-seed/repos.conf)
+  4. <script dir>/repos.conf
 
 Config format (repos.conf):
   [path ~/projects]
@@ -909,7 +903,7 @@ while [[ $# -gt 0 ]]; do
                        [[ -z "$WHERE_REPO" ]] && { echo "[ERROR] --where requires a repo argument" >&2; exit 1; } ;;
         --recent)      set_command recent
                        if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
-                           [[ "$2" =~ ^[0-9]+$ ]] || { echo "[ERROR] --recent expects a positive integer, got: $2" >&2; exit 1; }
+                           [[ "$2" =~ ^[1-9][0-9]*$ ]] || { echo "[ERROR] --recent expects a positive integer, got: $2" >&2; exit 1; }
                            RECENT_N="$2"; shift
                        fi ;;
         --mine)        RECENT_MINE=true ;;

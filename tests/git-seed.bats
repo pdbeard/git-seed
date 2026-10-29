@@ -16,6 +16,17 @@ _make_repo() {
         commit -qm "$msg"
 }
 
+# Gives a repo a local bare origin and makes its branch track it, so it has
+# an upstream to pull from. Prints the bare repo's path.
+_track_upstream() {
+    local path="$1" bare="$SANDBOX/$(basename "$1").git"
+    git clone -q --bare "$path" "$bare"
+    git -C "$path" remote set-url origin "file://$bare"
+    git -C "$path" fetch -q origin
+    git -C "$path" branch -q -u "origin/$(git -C "$path" branch --show-current)"
+    printf "%s\n" "$bare"
+}
+
 setup() {
     SANDBOX=$(mktemp -d)
     REPO_BASE="$SANDBOX/repos"
@@ -165,6 +176,14 @@ teardown() {
     [ "$output" = "$REPO_BASE/personal/alpha" ]
 }
 
+@test "--where refuses an ambiguous repo name and lists the matches" {
+    _make_repo "$REPO_BASE/work/alpha" "https://github.com/testorg/alpha.git"
+    echo "work  testorg/alpha" >> "$CONF"
+    run "$SEED" --conf "$CONF" --where alpha
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"several repos"*"personal/alpha"*"work/alpha"* ]]
+}
+
 @test "--where exits 1 for unknown repo" {
     run "$SEED" --conf "$CONF" --where nobody/nosuchrepo
     [ "$status" -eq 1 ]
@@ -213,6 +232,12 @@ teardown() {
 
 @test "--recent exits 1 for non-integer N" {
     run "$SEED" --conf "$CONF" --recent abc
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"positive integer"* ]]
+}
+
+@test "--recent rejects 0" {
+    run "$SEED" --conf "$CONF" --recent 0
     [ "$status" -eq 1 ]
     [[ "$output" == *"positive integer"* ]]
 }
@@ -272,6 +297,17 @@ EOF
     [ -d "$opened" ]
 }
 
+@test "--open accepts an EDITOR that carries flags" {
+    cat > "$SANDBOX/bin/mock-editor" <<'EOF'
+#!/usr/bin/env bash
+echo "args:$*"
+EOF
+    chmod +x "$SANDBOX/bin/mock-editor"
+    EDITOR="mock-editor --wait" run "$SEED" --conf "$CONF" --open
+    [ "$status" -eq 0 ]
+    [[ "$output" == "args:--wait $REPO_BASE/"* ]]
+}
+
 @test "--open exits 1 when no editor found and EDITOR unset" {
     # /bin contains bash but not vim or code; /usr/bin/env can find bash via /bin.
     # Stripping homebrew and /usr/bin ensures no vim or code fallback is found.
@@ -284,9 +320,11 @@ EOF
 # ── --sync / --clone-only / --pull-only ───────────────────────────────
 
 @test "--sync --dry-run prints DRY lines without modifying files" {
+    echo "personal  pdbeard/ghost" >> "$CONF"
     run "$SEED" --conf "$CONF" --sync --dry-run
     [ "$status" -eq 0 ]
-    [[ "$output" == *"[DRY]"* ]]
+    [[ "$output" == *"[DRY]"*"would clone pdbeard/ghost"* ]]
+    [ ! -e "$REPO_BASE/personal/ghost" ]
 }
 
 @test "--sync --dry-run suppresses browse hint" {
@@ -321,10 +359,8 @@ EOF
 @test "--sync pulls an existing repo" {
     # Create a bare remote from alpha, add a commit via a temp clone, then
     # point alpha's origin at the bare so --pull-only can fetch it.
-    local bare="$SANDBOX/bare-alpha.git"
-    local upstream="$SANDBOX/upstream-alpha"
-    git clone -q --bare "$REPO_BASE/personal/alpha" "$bare"
-    git -C "$REPO_BASE/personal/alpha" remote set-url origin "file://$bare"
+    local bare upstream="$SANDBOX/upstream-alpha"
+    bare="$(_track_upstream "$REPO_BASE/personal/alpha")"
     git clone -q "file://$bare" "$upstream"
     git -C "$upstream" -c user.email=test@test.com -c user.name=Test \
         commit -qm "upstream change" --allow-empty
@@ -333,6 +369,13 @@ EOF
     run "$SEED" --conf "$CONF" --pull-only
     [ "$status" -eq 0 ]
     [[ "$output" == *"[PULL]"*"alpha"* ]]
+    [ "$(git -C "$REPO_BASE/personal/alpha" log -1 --format=%s)" = "upstream change" ]
+}
+
+@test "--sync skips a repo with no upstream instead of failing" {
+    run "$SEED" --conf "$CONF" --pull-only
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[SKIP]"*"testorg/beta"*"no upstream"* ]]
 }
 
 @test "--sync skips repo on detached HEAD instead of erroring" {
@@ -344,11 +387,34 @@ EOF
     [[ "$output" == *"detached HEAD"* ]]
 }
 
+@test "--sync --dry-run also skips a detached HEAD instead of promising a pull" {
+    git -C "$REPO_BASE/personal/alpha" checkout -q \
+        "$(git -C "$REPO_BASE/personal/alpha" rev-parse HEAD)"
+    run "$SEED" --conf "$CONF" --pull-only --dry-run
+    [[ "$output" == *"[SKIP]"*"alpha"*"detached HEAD"* ]]
+    [[ "$output" != *"would pull pdbeard/alpha"* ]]
+}
+
+@test "--sync refuses a non-fast-forward pull and exits 1" {
+    local upstream
+    upstream="$(_track_upstream "$REPO_BASE/personal/alpha")"
+    git clone -q "$upstream" "$SANDBOX/other"
+    git -C "$SANDBOX/other" -c user.email=t@t -c user.name=T commit -q --allow-empty -m theirs
+    git -C "$SANDBOX/other" push -q
+    git -C "$REPO_BASE/personal/alpha" -c user.email=t@t -c user.name=T commit -q --allow-empty -m mine
+    # pull.rebase=false would merge here; --ff-only must still refuse.
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=pull.rebase GIT_CONFIG_VALUE_0=false \
+        run "$SEED" --conf "$CONF" --pull-only
+    [ "$status" -eq 1 ]
+    [ ! -f "$REPO_BASE/personal/alpha/.git/MERGE_HEAD" ]
+}
+
 @test "--sync tracks error count and warns when a pull fails" {
     # Point alpha's origin at a non-existent path so pull fails
+    _track_upstream "$REPO_BASE/personal/alpha" >/dev/null
     git -C "$REPO_BASE/personal/alpha" remote set-url origin "file:///nonexistent"
     run "$SEED" --conf "$CONF" --pull-only
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 1 ]
     [[ "$output" == *"[WARN]"*"failed to sync"* ]]
 }
 
@@ -381,6 +447,58 @@ EOF
 @test "--scout hints about --browse after adding" {
     run "$SEED" --conf "$CONF" --scout
     [[ "$output" == *"--browse"* ]]
+}
+
+@test "--scout inserts under a header that has an inline comment and trailing space" {
+    printf '# [path %s]\n[path %s]   # mine\npersonal  pdbeard/alpha\n' \
+        "$REPO_BASE" "$REPO_BASE" > "$CONF"
+    run "$SEED" --conf "$CONF" --scout
+    [ "$status" -eq 0 ]
+    [ "$(sed -n 4p "$CONF")" = "personal  pdbeard/untracked" ]
+    [ "$(grep -c '^\[path' "$CONF")" -eq 1 ]
+}
+
+@test "--scout appends a new section when no header matches" {
+    printf 'personal  pdbeard/alpha\n' > "$CONF"
+    _make_repo "$SANDBOX/elsewhere/x/new" "https://github.com/me/new.git"
+    run "$SEED" --conf "$CONF" --base "$SANDBOX/elsewhere" --scout
+    [ "$status" -eq 0 ]
+    grep -q "^x  me/new$" "$CONF"
+}
+
+@test "--scout writes through a symlinked conf" {
+    mv "$CONF" "$SANDBOX/real.conf"
+    ln -s "$SANDBOX/real.conf" "$CONF"
+    run "$SEED" --conf "$CONF" --scout
+    [ "$status" -eq 0 ]
+    [ -L "$CONF" ]
+    grep -q "pdbeard/untracked" "$SANDBOX/real.conf"
+}
+
+@test "--scout keeps dots in repo names" {
+    rm -rf "$REPO_BASE/personal/untracked"
+    _make_repo "$REPO_BASE/personal/site.github.io" "git@github.com:pdbeard/site.github.io.git"
+    run "$SEED" --conf "$CONF" --scout
+    grep -q "^personal  pdbeard/site.github.io$" "$CONF"
+    run "$SEED" --conf "$CONF" --status
+    [[ "$output" != *"malformed"* ]]
+    [[ "$output" == *"[OK]"*"pdbeard/site.github.io"* ]]
+}
+
+@test "--scout skips a clone whose folder name differs from the repo name" {
+    rm -rf "$REPO_BASE/personal/untracked"
+    _make_repo "$REPO_BASE/personal/old-name" "https://github.com/pdbeard/realname.git"
+    run "$SEED" --conf "$CONF" --scout
+    [[ "$output" == *"folder name differs"* ]]
+    ! grep -q "realname" "$CONF"
+}
+
+@test "--scout skips repos without a GitHub origin" {
+    rm -rf "$REPO_BASE/personal/untracked"
+    _make_repo "$REPO_BASE/personal/other" "https://gitlab.com/someone/other.git"
+    run "$SEED" --conf "$CONF" --scout
+    [[ "$output" == *"not a GitHub repo"* ]]
+    ! grep -q "other" "$CONF"
 }
 
 # ── --list ────────────────────────────────────────────────────────────
@@ -532,6 +650,14 @@ _make_upstream_repo() {
     [[ "$output" == *"[BROKEN]"* ]]
     [[ "$output" == *"not a git repo"* ]]
     [[ "$output" == *"broken: 1"* ]]
+}
+
+@test "--status reports a plain file at the clone path as BROKEN" {
+    mkdir -p "$REPO_BASE/personal"
+    echo "notes" > "$REPO_BASE/personal/gamma"
+    echo "personal  pdbeard/gamma" >> "$CONF"
+    run "$SEED" --conf "$CONF" --status
+    [[ "$output" == *"[BROKEN]"*"pdbeard/gamma"* ]]
 }
 
 @test "--status reports an empty directory as MISSING, not BROKEN" {
