@@ -468,19 +468,22 @@ browse_repos() {
 
 # ── --where ───────────────────────────────────────────────────────
 where_repo() {
-    local target="$1" repo path
+    local target="$1" repo path exact=""
     local -a by_name=()
 
     # Exact owner/repo match wins; otherwise fall back to the repo name
     # (e.g. "intermcli" -> "pdbeard/intermcli"), but only if it is unique.
+    # Read every line: leaving the loop early closes the pipe while
+    # parse_conf is still writing, and its "Broken pipe" error lands on stderr.
     while IFS=$'\t' read -r repo path; do
-        if [[ "$repo" == "$target" ]]; then
-            printf "%s\n" "$path"
-            return 0
-        fi
+        if [[ "$repo" == "$target" && -z "$exact" ]]; then exact="$path"; fi
         [[ "${repo##*/}" == "$target" ]] && by_name+=("$path")
     done < <(parse_conf do_emit)
 
+    if [[ -n "$exact" ]]; then
+        printf "%s\n" "$exact"
+        return 0
+    fi
     if (( ${#by_name[@]} == 1 )); then
         printf "%s\n" "${by_name[0]}"
         return 0
